@@ -1,13 +1,10 @@
-import dotenv from 'dotenv';
+import 'dotenv/config';
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
-
-// Load environment variables
-dotenv.config();
 import { dbStorage } from './utils/db-storage';
 import { testConnection } from './utils/firebase';
 import { verifyToken } from './utils/auth';

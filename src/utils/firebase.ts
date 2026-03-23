@@ -1,10 +1,34 @@
+import 'dotenv/config';
 import admin from 'firebase-admin';
+import fs from 'fs';
 import path from 'path';
 
-// Load service account key from project root
-const serviceAccountPath = path.resolve(__dirname, '../../../../pigsail-f5664-firebase-adminsdk-fbsvc-1bc30d4f13.json');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const serviceAccount = require(serviceAccountPath);
+function loadServiceAccount(): admin.ServiceAccount {
+  const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+  const filePath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH?.trim();
+
+  if (json) {
+    try {
+      return JSON.parse(json) as admin.ServiceAccount;
+    } catch {
+      throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON');
+    }
+  }
+
+  if (filePath) {
+    const resolved = path.isAbsolute(filePath)
+      ? filePath
+      : path.resolve(process.cwd(), filePath);
+    const raw = fs.readFileSync(resolved, 'utf8');
+    return JSON.parse(raw) as admin.ServiceAccount;
+  }
+
+  throw new Error(
+    'Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH in .env'
+  );
+}
+
+const serviceAccount = loadServiceAccount();
 
 if (!admin.apps.length) {
   admin.initializeApp({
