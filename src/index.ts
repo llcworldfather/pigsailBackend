@@ -84,18 +84,25 @@ function parseChineseOrArabicNumber(value: string): number | null {
   return typeof direct === 'number' ? direct : null;
 }
 
-// Allowed origins for CORS
-const allowedOrigins = [
-  "http://localhost:3000",
-  "http://localhost:3001",
-  "http://localhost:3002",
-  "http://localhost:3003",
-  "http://localhost:3004",
-  "http://localhost:3005",
-  "http://localhost:3006",
-  "http://localhost:3007",
-  "http://localhost:3008"
+// Allowed origins for CORS (localhost + optional CORS_ORIGINS=comma,separated,urls)
+const defaultAllowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://localhost:3003',
+  'http://localhost:3004',
+  'http://localhost:3005',
+  'http://localhost:3006',
+  'http://localhost:3007',
+  'http://localhost:3008',
+  'https://www.pigsail.wtf',
+  'https://pigsail.wtf'
 ];
+const extraFromEnv = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...extraFromEnv])];
 
 // Socket.io setup
 const io = new Server(server, {
