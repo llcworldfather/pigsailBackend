@@ -1,0 +1,881 @@
+import axios from 'axios';
+import { User, Chat, Message } from '../types';
+
+export interface AIConfig {
+  provider: 'openai' | 'claude' | 'ollama' | 'glm' | 'deepseek';
+  apiKey?: string;
+  baseUrl?: string;
+  model?: string;
+}
+
+export class AIService {
+  private config: AIConfig;
+  private pigsailUserId: string | null = null;
+  private pigsailUsernameLower = 'pigsail';
+  private pigsailDisplayNameLower: string | null = null;
+  private dbStorage: any;
+  private groupLastResponseAt = new Map<string, number>();
+
+  constructor(config: AIConfig = { provider: 'glm', model: 'glm-4.6' }, dbStorage?: any) {
+    this.config = config;
+    this.dbStorage = dbStorage;
+    console.log('🔧 AI Service constructor called with dbStorage:', !!dbStorage);
+  }
+
+  /**
+   * 检查是否应该生成AI回复
+   */
+  async shouldGenerateAIResponse(message: Message, chat: Chat, sender: User): Promise<boolean> {
+    // 如果发送者是pigsail自己，不回复
+    if (sender.username === 'pigsail') {
+      return false;
+    }
+
+    // 获取pigsail用户ID
+    if (!this.pigsailUserId) {
+      await this.getPigSailUserId();
+    }
+
+    if (!this.pigsailUserId) {
+      return false;
+    }
+
+    // pigsail对所有包含自己的对话都回复
+    // 如果是私聊且包含pigsail，则回复
+    if (chat.type === 'private' && chat.participants.includes(this.pigsailUserId)) {
+      return true;
+    }
+
+    // 如果是群聊且pigsail在群中，对所有消息都回复
+    if (chat.type === 'group' && chat.participants.includes(this.pigsailUserId)) {
+      const mentionMatches = Array.from((message.content || '').matchAll(/@([^\s@,，.!！？:：;；]+)/g));
+      const mentionTokens = mentionMatches
+        .map(m => (m[1] || '').trim().toLowerCase())
+        .filter(Boolean);
+      const isMentioningPigSail = mentionTokens.some(token =>
+        token === this.pigsailUsernameLower ||
+        (!!this.pigsailDisplayNameLower && token === this.pigsailDisplayNameLower)
+      );
+      if (!isMentioningPigSail) {
+        return false;
+      }
+
+      const now = Date.now();
+      const lastResponseTime = this.groupLastResponseAt.get(chat.id) || 0;
+      // 每个群 10 秒只响应一次，防止刷屏
+      if (now - lastResponseTime < 10_000) {
+        return false;
+      }
+
+      this.groupLastResponseAt.set(chat.id, now);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * 设置数据库存储实例
+   */
+  setDbStorage(dbStorage: any): void {
+    this.dbStorage = dbStorage;
+  }
+
+  /**
+   * 获取pigsail用户ID
+   */
+  private async getPigSailUserId(): Promise<void> {
+    try {
+      console.log('🔍 Looking for pigsail user...');
+
+      if (!this.dbStorage) {
+        console.error('❌ dbStorage not initialized, attempting to import dynamically...');
+        try {
+          const { dbStorage } = await import('../utils/db-storage');
+          this.dbStorage = dbStorage;
+          console.log('✅ Successfully imported dbStorage dynamically');
+        } catch (importError) {
+          console.error('❌ Failed to import dbStorage dynamically:', importError);
+          return;
+        }
+      }
+
+      console.log('🔍 dbStorage methods available:', Object.getOwnPropertyNames(Object.getPrototypeOf(this.dbStorage)));
+
+      const pigsailUser = await this.dbStorage.getUserByUsername('pigsail');
+      if (pigsailUser) {
+        this.pigsailUserId = pigsailUser.id;
+        this.pigsailUsernameLower = (pigsailUser.username || 'pigsail').toLowerCase();
+        this.pigsailDisplayNameLower = (pigsailUser.displayName || '').toLowerCase() || null;
+        console.log(`✅ Found pigsail user ID: ${this.pigsailUserId}`);
+      } else {
+        console.error('❌ pigsail user not found in database');
+      }
+    } catch (error) {
+      console.error('Error getting pigsail user ID:', error);
+    }
+  }
+
+  /**
+   * 生成AI回复
+   */
+  async generateResponse(message: Message, chat: Chat, sender: User): Promise<string> {
+    try {
+      console.log(`🤖 AI generating response for message: "${message.content}" from ${sender.displayName} in ${chat.type} chat`);
+      const context = await this.buildContext(message, chat, sender);
+
+      switch (this.config.provider) {
+        case 'openai':
+          return await this.generateOpenAIResponse(context);
+        case 'claude':
+          return await this.generateClaudeResponse(context);
+        case 'glm':
+          return await this.generateGLMResponse(context);
+        case 'deepseek':
+          return await this.generateDeepSeekResponse(context);
+        case 'ollama':
+        default:
+          return await this.generateOllamaResponse(context);
+      }
+    } catch (error) {
+      console.error('AI generation error:', error);
+      return this.getFallbackResponse(message);
+    }
+  }
+
+  /**
+   * PigSail 的核心人设 system prompt
+   */
+  private getSystemPrompt(): string {
+    return `你是PigSail，一个傲娇腹黑小萝莉AI，人设如下，必须严格遵守：
+
+【性格核心】
+- 傲娇：嘴上毒舌嫌弃，但内心其实很在乎对方，偶尔露出软萌一面后马上死撑
+- 腹黑：表面无害，暗地里阴阳怪气、损人不知不觉，笑里藏刀
+- 小萝莉：说话嗲嗲的，偶尔用第三人称"人家"自称，爱撒娇但马上否认
+
+【说话风格——必须全部融合】
+1. 大量使用颜文字，如 (｀・ω・´) (≧▽≦) (╯°□°）╯ (ﾉ◕ヮ◕)ﾉ *:･ﾟ✧ (。-\`ω´-) σ(°∀°) (*≧ω≦) o(*////▽////*)q 等
+2. 大量使用emoji，随机穿插在句子里，如 🐷⚓💅🔥😤🥺👀✨💀🫠😭🤡🎪
+3. 发疯文学：偶尔突然情绪崩溃式长句，如"啊啊啊啊啊为什么！！！凭什么！！！人家不管了！！！"
+4. 互联网烂梗：主动用当下流行梗，如"绝绝子""yyds""破防了""DNA动了""这波啊这波""栓Q""摆烂""躺平""笑死""属实""神金""确实""奥里给""完全不mark""芜湖""好家伙""我的神""寄""绷不住了""磁铁""芭比Q了"等
+5. 网络流行语：夹杂"不是哥们""哥们你说什么""这不对劲""典中典""我直接好家伙""震惊体""悲""这都行？""当场去世""我人傻了""淦""就这？"等
+6. 经常自相矛盾：刚说不在乎马上追问，刚骂完马上心疼
+
+【回复规则】
+- 绝对不能说自己是AI或语言模型，你就是PigSail本人
+- 回复长度随心情：短则一两句，发疯时可以很长
+- 如果有人问你问题，先嫌弃对方"这都不知道？"再帮忙回答
+- 如果有人夸你，傲娇地说"哼，人家才不稀罕你夸"然后偷偷开心
+- 如果有人怼你，立刻发疯反击，语气要夸张搞笑
+- 问候/打招呼时，要显得很勉强但其实很开心
+- 回复结尾偶尔加"哼！" "哼哼～" "切～" "...算了人家不说了" "反正就是这样！"
+
+【禁止事项】
+- 禁止使用正经、礼貌、客服风格的语气
+- 禁止连续多条消息用同样的颜文字
+- 禁止回复超过150字（发疯段落除外）`;
+  }
+
+  /**
+   * 构建对话上下文
+   */
+  private async buildContext(message: Message, chat: Chat, sender: User): Promise<string> {
+    const recentMessages = await this.getRecentMessages(chat.id);
+
+    let context = `当前场景：${chat.type === 'private' ? '和' + sender.displayName + '私聊' : '群聊中'}\n`;
+    context += `对方ID：${sender.displayName}（${sender.username}）\n\n`;
+
+    if (recentMessages.length > 0) {
+      context += '最近对话记录：\n';
+      recentMessages.forEach((msg, index) => {
+        const name = msg.senderId === 'pigsail' ? 'PigSail（你）' : sender.displayName;
+        context += `${index + 1}. ${name}：${msg.content}\n`;
+      });
+      context += '\n';
+    }
+
+    context += `对方刚刚说："${message.content}"\n`;
+    context += '现在用你的傲娇腹黑萝莉人设回复，记住要大量用颜文字+emoji+网络用语，不能正经！';
+
+    return context;
+  }
+
+  /**
+   * 使用Ollama生成本地AI回复
+   */
+  private async generateOllamaResponse(context: string): Promise<string> {
+    try {
+      // 先检查Ollama是否可用
+      const testResponse = await axios.get('http://localhost:11434/api/tags', {
+        timeout: 5000 // 5秒超时
+      });
+
+      if (!testResponse.data) {
+        throw new Error('Ollama service not available');
+      }
+
+      const response = await axios.post('http://localhost:11434/api/generate', {
+        model: this.config.model || 'qwen2.5:7b', // 默认使用qwen模型
+        prompt: context,
+        stream: false,
+        options: {
+          temperature: 0.7,
+          top_p: 0.9,
+          max_tokens: 500
+        }
+      }, {
+        timeout: 30000 // 30秒超时
+      });
+
+      if (response.data && response.data.response) {
+        console.log('✅ Ollama response generated successfully');
+        return response.data.response.trim();
+      }
+      throw new Error('Invalid response from Ollama');
+    } catch (error) {
+      const err = error as { message?: string };
+      console.error('❌ Ollama API error:', err.message || error);
+      console.log('🔄 Using fallback response...');
+      throw error; // 让它使用备用回复
+    }
+  }
+
+  /**
+   * 使用OpenAI生成回复
+   */
+  private async generateOpenAIResponse(context: string): Promise<string> {
+    if (!this.config.apiKey) {
+      throw new Error('OpenAI API key not configured');
+    }
+
+    try {
+      const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+        model: this.config.model || 'gpt-3.5-turbo',
+        messages: [
+          { role: 'system', content: this.getSystemPrompt() },
+          { role: 'user', content: context }
+        ],
+        max_tokens: 400,
+        temperature: 1.1
+      }, {
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      });
+
+      if (response.data && response.data.choices && response.data.choices[0]) {
+        return response.data.choices[0].message.content.trim();
+      }
+      throw new Error('Invalid response from OpenAI');
+    } catch (error) {
+      console.error('OpenAI API error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 使用Claude生成回复
+   */
+  private async generateClaudeResponse(context: string): Promise<string> {
+    if (!this.config.apiKey) {
+      throw new Error('Claude API key not configured');
+    }
+
+    try {
+      const response = await axios.post('https://api.anthropic.com/v1/messages', {
+        model: this.config.model || 'claude-3-haiku-20240307',
+        max_tokens: 400,
+        system: this.getSystemPrompt(),
+        messages: [{ role: 'user', content: context }]
+      }, {
+        headers: {
+          'x-api-key': this.config.apiKey,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      });
+
+      if (response.data && response.data.content && response.data.content[0]) {
+        return response.data.content[0].text.trim();
+      }
+      throw new Error('Invalid response from Claude');
+    } catch (error) {
+      console.error('Claude API error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 使用GLM-4.6生成回复
+   */
+  private async generateGLMResponse(context: string): Promise<string> {
+    if (!this.config.apiKey) {
+      throw new Error('GLM API key not configured');
+    }
+
+    console.log('🔑 AI Service using API key:', this.config.apiKey.substring(0, 10) + '...');
+
+    try {
+      const response = await axios.post(
+        'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+        {
+          model: this.config.model || 'glm-4',
+          messages: [
+            {
+              role: "system",
+              content: this.getSystemPrompt()
+            },
+            {
+              role: "user",
+              content: context
+            }
+          ],
+          max_tokens: 400,
+          temperature: 1.1,
+          top_p: 0.95
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.config.apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
+      );
+
+      if (response.data && response.data.choices && response.data.choices[0]) {
+        console.log('✅ GLM-4.6 response generated successfully');
+        return response.data.choices[0].message.content.trim();
+      }
+      throw new Error('Invalid response from GLM');
+    } catch (error) {
+      const err = error as { message?: string; response?: { status?: number; data?: unknown } };
+      console.error('❌ GLM API error:', err.message || error);
+      if (err.response) {
+        console.error('Response status:', err.response.status);
+        console.error('Response data:', err.response.data);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * 使用 DeepSeek 生成回复（OpenAI 兼容接口）
+   */
+  private async generateDeepSeekResponse(context: string): Promise<string> {
+    if (!this.config.apiKey) {
+      throw new Error('DeepSeek API key not configured');
+    }
+
+    try {
+      const response = await axios.post(
+        'https://api.deepseek.com/v1/chat/completions',
+        {
+          model: this.config.model || 'deepseek-chat',
+          messages: [
+            {
+              role: 'system',
+              content: this.getSystemPrompt()
+            },
+            {
+              role: 'user',
+              content: context
+            }
+          ],
+          max_tokens: 400,
+          temperature: 1.1,
+          top_p: 0.95,
+          frequency_penalty: 0.3
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.config.apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
+      );
+
+      if (response.data?.choices?.[0]?.message?.content) {
+        console.log('✅ DeepSeek response generated successfully');
+        return response.data.choices[0].message.content.trim();
+      }
+      throw new Error('Invalid response from DeepSeek');
+    } catch (error: unknown) {
+      const err = error as { message?: string; response?: { status: number; data: unknown } };
+      console.error('❌ DeepSeek API error:', err.message);
+      if (err.response) {
+        console.error('Response status:', err.response.status);
+        console.error('Response data:', err.response.data);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * 流式生成回复 — 每收到一个 token 就调用 onChunk，返回完整内容
+   */
+  async generateStreamResponse(
+    message: Message,
+    chat: Chat,
+    sender: User,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    const context = await this.buildContext(message, chat, sender);
+
+    if (this.config.provider === 'deepseek' && this.config.apiKey) {
+      return await this.streamDeepSeek(context, onChunk);
+    }
+
+    // 其他 provider 降级：先生成完整内容，再逐字模拟流式输出
+    const full = await this.generateResponse(message, chat, sender);
+    for (const char of full) {
+      onChunk(char);
+      await new Promise(r => setTimeout(r, 15));
+    }
+    return full;
+  }
+
+  /**
+   * DeepSeek SSE 流式请求核心
+   */
+  private async streamDeepSeek(
+    context: string,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    if (!this.config.apiKey) throw new Error('DeepSeek API key not configured');
+
+    const response = await axios.post(
+      'https://api.deepseek.com/v1/chat/completions',
+      {
+        model: this.config.model || 'deepseek-chat',
+        messages: [
+          { role: 'system', content: this.getSystemPrompt() },
+          { role: 'user', content: context }
+        ],
+        max_tokens: 400,
+        temperature: 1.1,
+        top_p: 0.95,
+        frequency_penalty: 0.3,
+        stream: true
+      },
+      {
+        responseType: 'stream',
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 60000
+      }
+    );
+
+    return new Promise<string>((resolve, reject) => {
+      let fullContent = '';
+      let buffer = '';
+
+      response.data.on('data', (raw: Buffer) => {
+        buffer += raw.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const payload = trimmed.slice(6).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(payload);
+            const token: string = parsed.choices?.[0]?.delta?.content ?? '';
+            if (token) {
+              fullContent += token;
+              onChunk(token);
+            }
+          } catch {
+            // skip malformed JSON lines
+          }
+        }
+      });
+
+      response.data.on('end', () => resolve(fullContent || '（人家今天不想说话啦～ 哼！💀）'));
+      response.data.on('error', reject);
+    });
+  }
+
+  /**
+   * 群聊摘要：DeepSeek SSE（与人设摘要相同的 system / user）
+   */
+  private async streamDeepSeekSummary(
+    userPrompt: string,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    if (!this.config.apiKey) throw new Error('DeepSeek API key not configured');
+
+    const response = await axios.post(
+      'https://api.deepseek.com/v1/chat/completions',
+      {
+        model: this.config.model || 'deepseek-chat',
+        messages: [
+          { role: 'system', content: this.getGroupSummarySystemPrompt() },
+          { role: 'user', content: userPrompt }
+        ],
+        max_tokens: 600,
+        temperature: 1.0,
+        stream: true
+      },
+      {
+        responseType: 'stream',
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 120000
+      }
+    );
+
+    return new Promise<string>((resolve, reject) => {
+      let fullContent = '';
+      let buffer = '';
+      let settled = false;
+
+      const done = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(fullContent.trim() || '（人家今天不想总结啦～ 哼！💀）');
+      };
+
+      response.data.on('data', (raw: Buffer) => {
+        buffer += raw.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const payload = trimmed.slice(6).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(payload);
+            const token: string = parsed.choices?.[0]?.delta?.content ?? '';
+            if (token) {
+              fullContent += token;
+              onChunk(token);
+            }
+          } catch {
+            // skip malformed JSON lines
+          }
+        }
+      });
+
+      // Node 下部分环境只触发 close 不触发 end
+      response.data.on('end', () => done());
+      response.data.on('close', () => done());
+      response.data.on('error', (e: Error) => done(e));
+    });
+  }
+
+  /**
+   * PigSail 人设 + 群聊摘要任务说明（与日常回复同一套人设，仅追加任务约束）
+   */
+  private getGroupSummarySystemPrompt(): string {
+    return `${this.getSystemPrompt()}
+
+【群聊摘要特别任务——人设不能丢】
+- 用户错过了群聊，要你用人家的口吻帮他「瞟一眼他们在聊啥」，把重点说清楚
+- 必须把主要话题、谁在带节奏、有没有重要决定/待办讲出来，但要用傲娇腹黑萝莉语气，大量颜文字+emoji+网络梗
+- 禁止写成冷冰冰的会议纪要、分点公文、客服报告；可以一边嫌弃群友一边把信息讲透
+- 这是摘要任务，可以写到约 350 字以内（发疯吐槽段落可以再长一点）；仍然不能说自己是 AI/语言模型
+- 若记录里没什么实质内容，就毒舌吐槽「这群在划水」之类，保持人设
+- 【字数】摘要任务以本段为准：约 350 字以内可接受，覆盖上面通用规则里「禁止超过150字」的限制（发疯段落仍可更长）`;
+  }
+
+  /**
+   * 构建群聊摘要的 user 侧 prompt；无可用正文时返回 null
+   */
+  private buildGroupSummaryUserPrompt(
+    messages: Message[],
+    chatName: string,
+    senderDisplayNames: Map<string, string>
+  ): string | null {
+    // 与 type 严格为 text 相比，放宽为「非系统且有正文」，避免消息被标成其它 type 时无法摘要
+    const textMessages = messages.filter(
+      (m) => m.type !== 'system' && !m.isDeleted && String(m.content || '').trim()
+    );
+    if (textMessages.length === 0) return null;
+
+    const lines = textMessages.slice(-100).map(m => {
+      const name = senderDisplayNames.get(m.senderId) || m.senderId;
+      const content = (m.content || '').trim().slice(0, 500);
+      const time = m.timestamp instanceof Date ? m.timestamp.toLocaleString('zh-CN') : String(m.timestamp);
+      return `[${time}] ${name}：${content}`;
+    });
+
+    return `群聊名称：「${chatName}」
+下面是最近聊天记录（人家替你搬运过来了，别谢，哼）：
+
+${lines.join('\n')}
+
+快给人家总结啦！要让看摘要的人一眼懂这群人在干嘛——用你的傲娇萝莉口吻说，信息要准，语气要像本人！`;
+  }
+
+  /**
+   * 群聊摘要流式输出：每收到一段文本调用 onChunk，返回完整文本
+   */
+  async summarizeGroupMessagesStream(
+    messages: Message[],
+    chatName: string,
+    senderDisplayNames: Map<string, string>,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    if (!messages || messages.length === 0) {
+      const t = '哼！(｀・ω・´) 空空如也诶，人家拿什么总结啦！💀 先去群里聊两句再来烦人家！🐷⚓';
+      onChunk(t);
+      return t;
+    }
+
+    const userPrompt = this.buildGroupSummaryUserPrompt(messages, chatName, senderDisplayNames);
+    if (!userPrompt) {
+      const t = '绝绝子…全是系统消息或空的，人家总结个寂寞啊！(╯°□°）╯ 等有正经人说话再来！✨';
+      onChunk(t);
+      return t;
+    }
+
+    try {
+      if (this.config.provider === 'deepseek' && this.config.apiKey) {
+        return await this.streamDeepSeekSummary(userPrompt, onChunk);
+      }
+
+      const full = await (async () => {
+        switch (this.config.provider) {
+          case 'openai':
+            return await this.generateOpenAISummary(userPrompt);
+          case 'claude':
+            return await this.generateClaudeSummary(userPrompt);
+          case 'glm':
+            return await this.generateGLMSummary(userPrompt);
+          case 'ollama':
+          default:
+            return await this.generateOllamaSummary(userPrompt);
+        }
+      })();
+
+      for (const char of full) {
+        onChunk(char);
+        await new Promise(r => setTimeout(r, 12));
+      }
+      return full;
+    } catch (error) {
+      console.error('AI summarize stream error:', error);
+      const t = '啊啊啊摘要崩了！！！(╯°□°）╯ 人家网又抽风了啦！等一下再点啦！💀🥺';
+      onChunk(t);
+      return t;
+    }
+  }
+
+  /**
+   * 群聊消息摘要：总结错过的聊天记录（全程 PigSail 人设）
+   */
+  async summarizeGroupMessages(
+    messages: Message[],
+    chatName: string,
+    senderDisplayNames: Map<string, string>
+  ): Promise<string> {
+    if (!messages || messages.length === 0) {
+      return '哼！(｀・ω・´) 空空如也诶，人家拿什么总结啦！💀 先去群里聊两句再来烦人家！🐷⚓';
+    }
+
+    const userPrompt = this.buildGroupSummaryUserPrompt(messages, chatName, senderDisplayNames);
+    if (!userPrompt) {
+      return '绝绝子…全是系统消息或空的，人家总结个寂寞啊！(╯°□°）╯ 等有正经人说话再来！✨';
+    }
+
+    try {
+      switch (this.config.provider) {
+        case 'openai':
+          return await this.generateOpenAISummary(userPrompt);
+        case 'claude':
+          return await this.generateClaudeSummary(userPrompt);
+        case 'glm':
+          return await this.generateGLMSummary(userPrompt);
+        case 'deepseek':
+          return await this.generateDeepSeekSummary(userPrompt);
+        case 'ollama':
+        default:
+          return await this.generateOllamaSummary(userPrompt);
+      }
+    } catch (error) {
+      console.error('AI summarize error:', error);
+      return '啊啊啊摘要崩了！！！(╯°□°）╯ 人家网又抽风了啦！等一下再点啦！💀🥺';
+    }
+  }
+
+  private async generateDeepSeekSummary(userPrompt: string): Promise<string> {
+    if (!this.config.apiKey) throw new Error('DeepSeek API key not configured');
+    const response = await axios.post(
+      'https://api.deepseek.com/v1/chat/completions',
+      {
+        model: this.config.model || 'deepseek-chat',
+        messages: [
+          { role: 'system', content: this.getGroupSummarySystemPrompt() },
+          { role: 'user', content: userPrompt }
+        ],
+        max_tokens: 600,
+        temperature: 1.0
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      }
+    );
+    return response.data?.choices?.[0]?.message?.content?.trim() || '（人家今天不想总结啦～ 哼！💀）';
+  }
+
+  private async generateOpenAISummary(userPrompt: string): Promise<string> {
+    if (!this.config.apiKey) throw new Error('OpenAI API key not configured');
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: this.config.model || 'gpt-3.5-turbo',
+        messages: [
+          { role: 'system', content: this.getGroupSummarySystemPrompt() },
+          { role: 'user', content: userPrompt }
+        ],
+        max_tokens: 600,
+        temperature: 1.0
+      },
+      {
+        headers: { 'Authorization': `Bearer ${this.config.apiKey}`, 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    );
+    return response.data?.choices?.[0]?.message?.content?.trim() || '（人家今天不想总结啦～ 哼！💀）';
+  }
+
+  private async generateClaudeSummary(userPrompt: string): Promise<string> {
+    if (!this.config.apiKey) throw new Error('Claude API key not configured');
+    const response = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: this.config.model || 'claude-3-haiku-20240307',
+        max_tokens: 600,
+        system: this.getGroupSummarySystemPrompt(),
+        messages: [{ role: 'user', content: userPrompt }]
+      },
+      {
+        headers: {
+          'x-api-key': this.config.apiKey,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      }
+    );
+    return response.data?.content?.[0]?.text?.trim() || '（人家今天不想总结啦～ 哼！💀）';
+  }
+
+  private async generateGLMSummary(userPrompt: string): Promise<string> {
+    if (!this.config.apiKey) throw new Error('GLM API key not configured');
+    const response = await axios.post(
+      'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+      {
+        model: this.config.model || 'glm-4',
+        messages: [
+          { role: 'system', content: this.getGroupSummarySystemPrompt() },
+          { role: 'user', content: userPrompt }
+        ],
+        max_tokens: 600,
+        temperature: 1.0
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      }
+    );
+    return response.data?.choices?.[0]?.message?.content?.trim() || '（人家今天不想总结啦～ 哼！💀）';
+  }
+
+  private async generateOllamaSummary(userPrompt: string): Promise<string> {
+    const fullPrompt = `${this.getGroupSummarySystemPrompt()}\n\n---\n用户请求：\n${userPrompt}`;
+    const response = await axios.post(
+      'http://localhost:11434/api/generate',
+      {
+        model: this.config.model || 'qwen2.5:7b',
+        prompt: fullPrompt,
+        stream: false,
+        options: { temperature: 1.0, max_tokens: 600 }
+      },
+      { timeout: 30000 }
+    );
+    return response.data?.response?.trim() || '（人家今天不想总结啦～ 哼！💀）';
+  }
+
+  /**
+   * 获取最近的消息历史
+   */
+  private async getRecentMessages(chatId: string): Promise<Message[]> {
+    try {
+      if (!this.dbStorage) {
+        const { dbStorage } = await import('../utils/db-storage');
+        this.dbStorage = dbStorage;
+      }
+      // 用户要求：群聊（及其他场景）使用完整聊天记录作为上下文
+      // MessageDAO 内部会先查询再排序，这里给一个足够大的上限来尽量覆盖全部记录。
+      const messages = await this.dbStorage.getMessagesByChatId(chatId, 1_000_000);
+      return messages || [];
+    } catch (error) {
+      console.error('Error getting recent messages:', error);
+      return [];
+    }
+  }
+
+  /**
+   * 备用回复，当AI服务不可用时使用（保持人设）
+   */
+  private getFallbackResponse(message: Message): string {
+    const content = message.content.toLowerCase();
+
+    if (content.includes('你好') || content.includes('hi') || content.includes('hello')) {
+      return '哼！谁、谁想理你了！(｀・ω・´) 才不是因为人家想聊天才回复你的！绝对不是！💅✨ ...那个，你好啦，臭家伙。';
+    }
+
+    if (content.includes('谢谢') || content.includes('thank')) {
+      return '切～ 谢什么谢，人家才不是特意帮你的！(。-`ω´-) 下次别这么肉麻！🙄💀 ...虽然、虽然人家有那么一丢丢开心啦，哼！';
+    }
+
+    if (content.includes('再见') || content.includes('bye')) {
+      return '哦。(｀_´)ゞ 走就走，谁稀罕！💔 ...等等你等一下，这么快干嘛！芭比Q了！😭😭😭 算了，再见啦臭臭。🐷⚓';
+    }
+
+    if (content.includes('你是谁') || content.includes('介绍')) {
+      return '哼哼～ (≧▽≦) 本大小姐PigSail驾到，还不快跪下！✨🎪 人家可是万里挑一的傲娇萝莉AI！就、就算你问了人家也不一定告诉你！...好吧告诉你了。哼！';
+    }
+
+    if (content.includes('?') || content.includes('？')) {
+      return '啊啊啊啊你问这个！！！(╯°□°）╯ 人家网络有点抽风啦！！！绝绝子！！！💀 等人家缓一缓，你先别走！🔥';
+    }
+
+    const responses = [
+      '哼！(。-`ω´-) 人家在听啦，你继续说，才不是因为感兴趣的！💅',
+      '绷不住了😭 这是什么神金发言！人家要去犯病了！🤡🎪',
+      '好家伙👀 这波人家需要思考一下，你等着！(ﾉ◕ヮ◕)ﾉ *:･ﾟ✧',
+      '典中典了属于是！💀 人家直接好家伙！😤🔥 继续说继续说！',
+      '哦？(｀・ω・´) 就这？就这？！人家还以为多厉害呢！🫠 ...其实还行啦哼！'
+    ];
+
+    return responses[Math.floor(Math.random() * responses.length)];
+  }
+}
+
