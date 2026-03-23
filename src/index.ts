@@ -9,6 +9,7 @@ import { dbStorage } from './utils/db-storage';
 import { testConnection } from './utils/firebase';
 import { verifyToken } from './utils/auth';
 import { getPublicServerBase, normalizeAvatarUrl, joinPublicPath } from './utils/public-url';
+import { pickRandomAvatarUrlFromFirebase, resolveAvatarInput } from './utils/avatar-storage';
 import { AIService } from './services/ai-service';
 import {
   User,
@@ -141,15 +142,25 @@ app.use('/api', limiter);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
 
-// Random avatar endpoint
-app.get('/api/random-avatar', (req, res) => {
+// Random avatar endpoint (Firebase avatars/random/* when bucket configured, else local ../random)
+app.get('/api/random-avatar', async (req, res) => {
   try {
+    const fromFirebase = await pickRandomAvatarUrlFromFirebase();
+    if (fromFirebase) {
+      return res.json({
+        success: true,
+        data: {
+          avatarUrl: fromFirebase.url,
+          filename: fromFirebase.filename
+        }
+      } as ApiResponse);
+    }
+
     const fs = require('fs');
     const path = require('path');
 
     const randomFolder = path.join(__dirname, '../../random');
 
-    // Check if random folder exists
     if (!fs.existsSync(randomFolder)) {
       return res.status(404).json({
         success: false,
@@ -157,12 +168,10 @@ app.get('/api/random-avatar', (req, res) => {
       } as ApiResponse);
     }
 
-    // Get all image files in the random folder
-    const files = fs.readdirSync(randomFolder)
-      .filter((file: string) => {
-        const ext = path.extname(file).toLowerCase();
-        return ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext);
-      });
+    const files = fs.readdirSync(randomFolder).filter((file: string) => {
+      const ext = path.extname(file).toLowerCase();
+      return ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext);
+    });
 
     if (files.length === 0) {
       return res.status(404).json({
@@ -171,7 +180,6 @@ app.get('/api/random-avatar', (req, res) => {
       } as ApiResponse);
     }
 
-    // Select a random file
     const randomFile = files[Math.floor(Math.random() * files.length)];
     const publicBase = getPublicServerBase(req);
     const avatarUrl = joinPublicPath(publicBase, `/random/${randomFile}`);
@@ -1048,7 +1056,13 @@ io.on('connection', async (socket) => {
 
         const updates: { name?: string; avatar?: string } = {};
         if (typeof data.name === 'string') updates.name = data.name.trim();
-        if (typeof data.avatar === 'string') updates.avatar = data.avatar.trim();
+        if (typeof data.avatar === 'string') {
+          updates.avatar = await resolveAvatarInput(
+            data.avatar,
+            { userId: user.id, kind: 'group', groupId: data.chatId },
+            publicBase
+          );
+        }
 
         if (updates.name !== undefined && !updates.name) {
           if (callback) callback({ error: 'Group name cannot be empty' });
@@ -1558,7 +1572,17 @@ io.on('connection', async (socket) => {
       console.log(`[SOCKET] Updating profile for user: ${user.displayName} (${user.id})`, data);
       console.log(`[SOCKET] Received data:`, JSON.stringify(data, null, 2));
 
-      const updatedUser = await dbStorage.updateUser(user.id, data);
+      const patch: { displayName?: string; avatar?: string } = {};
+      if (data.displayName !== undefined) patch.displayName = data.displayName;
+      if (data.avatar !== undefined) {
+        patch.avatar = await resolveAvatarInput(
+          data.avatar,
+          { userId: user.id, kind: 'user' },
+          publicBase
+        );
+      }
+
+      const updatedUser = await dbStorage.updateUser(user.id, patch);
 
       if (updatedUser) {
         // Update the user in socket storage
@@ -1657,7 +1681,7 @@ setInterval(async () => {
   });
 }, 3000);
 
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT || 5000;
 
 // Keep the pigsail AI account as a virtual always-online user
 async function keepPigsailOnline() {

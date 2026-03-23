@@ -1,0 +1,8 @@
+{
+  "storage": [
+    {
+      "bucket": "pigsail-f5664.firebasestorage.app",
+      "rules": "storage.rules"
+    }
+  ]
+}

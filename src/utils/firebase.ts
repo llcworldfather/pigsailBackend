@@ -67,9 +67,12 @@ function loadServiceAccount(): admin.ServiceAccount {
 
 const serviceAccount = loadServiceAccount();
 
+const storageBucket = process.env.FIREBASE_STORAGE_BUCKET?.trim();
+
 if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
+    credential: admin.credential.cert(serviceAccount),
+    ...(storageBucket ? { storageBucket } : {})
   });
 }
 

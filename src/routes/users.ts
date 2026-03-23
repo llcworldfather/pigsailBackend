@@ -2,6 +2,7 @@ import express from 'express';
 import { dbStorage } from '../utils/db-storage';
 import { verifyToken } from '../utils/auth';
 import { getPublicServerBase, normalizeAvatarUrl } from '../utils/public-url';
+import { resolveAvatarInput } from '../utils/avatar-storage';
 import { ApiResponse } from '../types';
 
 const router = express.Router();
@@ -120,7 +121,14 @@ router.put('/:id', authenticateToken, async (req, res) => {
             } as ApiResponse);
         }
 
-        const updateData: any = { displayName, avatar };
+        const publicBase = getPublicServerBase(req);
+        const updateData: any = { displayName };
+
+        if (typeof avatar === 'string') {
+            updateData.avatar = await resolveAvatarInput(avatar, { userId: currentUserId, kind: 'user' }, publicBase);
+        } else if (avatar !== undefined) {
+            updateData.avatar = avatar;
+        }
 
         // 如果提供了密码，需要哈希处理（这里简化处理）
         if (password) {
@@ -137,7 +145,6 @@ router.put('/:id', authenticateToken, async (req, res) => {
             } as ApiResponse);
         }
 
-        const publicBase = getPublicServerBase(req);
         // 返回安全的用户数据（不包含密码哈希）
         const safeUser = {
             id: updatedUser.id,
@@ -156,6 +163,13 @@ router.put('/:id', authenticateToken, async (req, res) => {
         } as ApiResponse);
     } catch (error) {
         console.error('Update user error:', error);
+        const msg = error instanceof Error ? error.message : '';
+        if (msg.includes('Invalid or oversized')) {
+            return res.status(400).json({
+                success: false,
+                error: msg
+            } as ApiResponse);
+        }
         res.status(500).json({
             success: false,
             error: 'Internal server error'

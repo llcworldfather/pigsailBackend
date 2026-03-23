@@ -29,7 +29,7 @@ export function getPublicServerBase(req?: IncomingMessage): string {
     }
   }
 
-  const port = process.env.PORT || '5001';
+  const port = process.env.PORT || '5000';
   return `http://localhost:${port}`;
 }
 
@@ -55,6 +55,12 @@ export function normalizeAvatarUrl(
   const base = publicBase.replace(/\/$/, '');
   const trimmed = String(avatar).trim();
   if (!trimmed) return avatar;
+
+  // Undo accidental "baseURL + absolute URL" concatenation from older clients
+  const doubleUrl = trimmed.match(/^(https?:\/\/[^/]+)(https?:\/\/.+)$/i);
+  if (doubleUrl) {
+    return normalizeAvatarUrl(doubleUrl[2], publicBase);
+  }
 
   if (trimmed.startsWith('/')) {
     return `${base}${trimmed}`;

@@ -1,7 +1,12 @@
 import express from 'express';
 import { dbStorage } from '../utils/db-storage';
 import { hashPassword, comparePassword, generateToken, verifyToken, createSafeUser } from '../utils/auth';
-import { getPublicServerBase, joinPublicPath, normalizeAvatarUrl } from '../utils/public-url';
+import { getPublicServerBase } from '../utils/public-url';
+import {
+  getDefaultAvatarUrl,
+  getPigsailAvatarUrl,
+  resolveAvatarInputForRegister
+} from '../utils/avatar-storage';
 import { RegisterRequest, LoginRequest, ApiResponse, Message } from '../types';
 
 const router = express.Router();
@@ -38,10 +43,10 @@ router.post('/register', async (req, res) => {
     // Hash password and create user
     const hashedPassword = await hashPassword(password);
     const publicBase = getPublicServerBase(req);
-    const defaultAvatar = joinPublicPath(publicBase, '/random/default-avatar.jpg');
+    const defaultAvatar = getDefaultAvatarUrl(publicBase);
     const finalAvatar =
       avatar && String(avatar).trim()
-        ? normalizeAvatarUrl(String(avatar).trim(), publicBase) || String(avatar).trim()
+        ? await resolveAvatarInputForRegister(String(avatar).trim(), username, publicBase)
         : defaultAvatar;
 
     const user = await dbStorage.createUser({
@@ -172,13 +177,6 @@ router.get('/me', async (req, res) => {
     } as ApiResponse);
   }
 });
-
-// The pigsail avatar is served from the /random static folder on the same server
-const PIGSAIL_AVATAR_PATH = '/random/pigsail-avatar.jpg';
-
-function getPigsailAvatarUrl(publicBase: string): string {
-  return joinPublicPath(publicBase, PIGSAIL_AVATAR_PATH);
-}
 
 // Helper function to ensure pigsail user exists and send welcome message
 async function addPigsailAsFriendAndSendWelcome(newUser: any, publicBase: string) {
