@@ -8,6 +8,7 @@ import path from 'path';
 import { dbStorage } from './utils/db-storage';
 import { testConnection } from './utils/firebase';
 import { verifyToken } from './utils/auth';
+import { getPublicServerBase, normalizeAvatarUrl, joinPublicPath } from './utils/public-url';
 import { AIService } from './services/ai-service';
 import {
   User,
@@ -172,7 +173,8 @@ app.get('/api/random-avatar', (req, res) => {
 
     // Select a random file
     const randomFile = files[Math.floor(Math.random() * files.length)];
-    const avatarUrl = `/random/${randomFile}`;
+    const publicBase = getPublicServerBase(req);
+    const avatarUrl = joinPublicPath(publicBase, `/random/${randomFile}`);
 
     res.json({
       success: true,
@@ -236,6 +238,21 @@ io.use(async (socket, next) => {
 // Socket.io connection handling
 io.on('connection', async (socket) => {
   const user = socket.data.user as User;
+  const publicBase = getPublicServerBase(socket.request);
+  const serializeChatOut = (chat: Chat) => {
+    const s = dbStorage.serializeChat(chat);
+    if (typeof s.avatar === 'string' && s.avatar) {
+      s.avatar = normalizeAvatarUrl(s.avatar, publicBase) ?? s.avatar;
+    }
+    return s;
+  };
+  const serializeChatsOut = (chats: Chat[]) => chats.map(serializeChatOut);
+  const normalizeOnlineUsers = (list: SocketUser[]) =>
+    list.map((u) => ({
+      ...u,
+      avatar: normalizeAvatarUrl(u.avatar, publicBase) ?? u.avatar
+    }));
+
   console.log(`User connected: ${user.displayName} (${user.id})`);
   const getParticipantSocket = (participantId: string) =>
     Array.from(io.sockets.sockets.values()).find(s => s.data.user?.id === participantId);
@@ -243,7 +260,7 @@ io.on('connection', async (socket) => {
     id: targetUser.id,
     username: targetUser.username,
     displayName: targetUser.displayName,
-    avatar: targetUser.avatar,
+    avatar: normalizeAvatarUrl(targetUser.avatar, publicBase) ?? targetUser.avatar,
     email: targetUser.email
   });
 
@@ -282,7 +299,7 @@ io.on('connection', async (socket) => {
       if (!targetSocket || !chat) return;
 
       const payloadChat = {
-        ...dbStorage.serializeChat(chat),
+        ...serializeChatOut(chat),
         participantsWithInfo: [toSafeUser(requester), toSafeUser(recipient)]
       };
 
@@ -299,7 +316,7 @@ io.on('connection', async (socket) => {
     id: user.id,
     username: user.username,
     displayName: user.displayName,
-    avatar: user.avatar,
+    avatar: normalizeAvatarUrl(user.avatar, publicBase) ?? user.avatar,
     status: 'online',
     socketId: socket.id
   };
@@ -316,7 +333,7 @@ io.on('connection', async (socket) => {
   // Send user's chats - load from database
   try {
     const userChats = await dbStorage.getChatsByUserId(user.id);
-    socket.emit('chats_loaded', dbStorage.serializeChats(userChats));
+    socket.emit('chats_loaded', serializeChatsOut(userChats));
     console.log(`Loaded ${userChats.length} chats for user ${user.displayName}`);
   } catch (error) {
     console.error('Error loading user chats:', error);
@@ -326,7 +343,7 @@ io.on('connection', async (socket) => {
   // Send online users to current user and broadcast to all others
   const onlineUsers = dbStorage.getOnlineUsers();
   console.log(`Sending online_users to ${user.displayName}:`, onlineUsers.map(u => u.displayName));
-  socket.emit('online_users', onlineUsers);
+  socket.emit('online_users', normalizeOnlineUsers(onlineUsers));
 
   // Send pending friend requests to the recipient
   try {
@@ -368,7 +385,7 @@ io.on('connection', async (socket) => {
   setTimeout(() => {
     const latestOnlineUsers = dbStorage.getOnlineUsers();
     console.log('Broadcasting updated online users list after new connection:', latestOnlineUsers.map(u => u.displayName));
-    io.emit('online_users', latestOnlineUsers);
+    io.emit('online_users', normalizeOnlineUsers(latestOnlineUsers));
   }, 50);
 
   // Get or create private chat
@@ -388,13 +405,13 @@ io.on('connection', async (socket) => {
       const recipient = await dbStorage.getUserById(recipientId);
 
       socket.emit('private_chat_loaded', {
-        chat: dbStorage.serializeChat(chat),
+        chat: serializeChatOut(chat),
         messages,
         recipient: recipient ? {
           id: recipient.id,
           username: recipient.username,
           displayName: recipient.displayName,
-          avatar: recipient.avatar,
+          avatar: normalizeAvatarUrl(recipient.avatar, publicBase) ?? recipient.avatar,
           status: recipient.status
         } : null
       });
@@ -431,7 +448,7 @@ io.on('connection', async (socket) => {
               id: recipientUser.id,
               username: recipientUser.username,
               displayName: recipientUser.displayName,
-              avatar: recipientUser.avatar,
+              avatar: normalizeAvatarUrl(recipientUser.avatar, publicBase) ?? recipientUser.avatar,
               status: recipientUser.status
             };
           }
@@ -439,7 +456,7 @@ io.on('connection', async (socket) => {
       }
 
       socket.emit('chat_messages_loaded', {
-        chat: dbStorage.serializeChat(chat),
+        chat: serializeChatOut(chat),
         messages,
         recipient
       });
@@ -532,13 +549,13 @@ io.on('connection', async (socket) => {
       const latestChat = await dbStorage.getChatById(chat.id);
 
       const payload = {
-        chat: dbStorage.serializeChat(latestChat || chat),
+        chat: serializeChatOut(latestChat || chat),
         messages: [welcomeMessage],
         recipient: {
           id: pigsailUser.id,
           username: pigsailUser.username,
           displayName: pigsailUser.displayName,
-          avatar: pigsailUser.avatar,
+          avatar: normalizeAvatarUrl(pigsailUser.avatar, publicBase) ?? pigsailUser.avatar,
           status: pigsailUser.status
         }
       };
@@ -583,7 +600,7 @@ io.on('connection', async (socket) => {
       if (existingChat) {
         if (callback) callback({
           alreadyFriends: true,
-          chat: dbStorage.serializeChat(existingChat),
+          chat: serializeChatOut(existingChat),
           friend: toSafeUser(friendUser)
         });
         return;
@@ -835,12 +852,12 @@ io.on('connection', async (socket) => {
           .find(s => s.data.user?.id === participantId);
 
         if (participantSocket) {
-          participantSocket.emit('group_created', dbStorage.serializeChat(chat));
+          participantSocket.emit('group_created', serializeChatOut(chat));
           participantSocket.emit('new_message', systemMessage);
         }
       });
 
-      socket.emit('group_created_success', dbStorage.serializeChat(chat));
+      socket.emit('group_created_success', serializeChatOut(chat));
 
     } catch (error) {
       console.error('Create group error:', error);
@@ -918,14 +935,14 @@ io.on('connection', async (socket) => {
 
           // For newly added users, ensure the chat appears in list immediately.
           if (validIds.includes(participantId)) {
-            participantSocket.emit('group_created', dbStorage.serializeChat(updatedChat));
+            participantSocket.emit('group_created', serializeChatOut(updatedChat));
           } else {
-            participantSocket.emit('group_profile_updated', dbStorage.serializeChat(updatedChat));
+            participantSocket.emit('group_profile_updated', serializeChatOut(updatedChat));
           }
           participantSocket.emit('new_message', systemMessage);
         });
 
-        if (callback) callback({ success: true, chat: dbStorage.serializeChat(updatedChat), addedMemberIds: validIds });
+        if (callback) callback({ success: true, chat: serializeChatOut(updatedChat), addedMemberIds: validIds });
       } catch (error) {
         console.error('Add group members error:', error);
         if (callback) callback({ error: 'Failed to add group members' });
@@ -988,7 +1005,7 @@ io.on('connection', async (socket) => {
         updatedChat.participants.forEach(participantId => {
           const participantSocket = getParticipantSocket(participantId);
           if (!participantSocket) return;
-          participantSocket.emit('group_profile_updated', dbStorage.serializeChat(updatedChat));
+          participantSocket.emit('group_profile_updated', serializeChatOut(updatedChat));
           participantSocket.emit('user_left_group', {
             chatId: updatedChat.id,
             userId: data.memberId,
@@ -1002,7 +1019,7 @@ io.on('connection', async (socket) => {
           removedSocket.emit('left_group', { chatId: updatedChat.id });
         }
 
-        if (callback) callback({ success: true, chat: dbStorage.serializeChat(updatedChat), removedMemberId: data.memberId });
+        if (callback) callback({ success: true, chat: serializeChatOut(updatedChat), removedMemberId: data.memberId });
       } catch (error) {
         console.error('Remove group member error:', error);
         if (callback) callback({ error: 'Failed to remove group member' });
@@ -1048,11 +1065,11 @@ io.on('connection', async (socket) => {
           const participantSocket = Array.from(io.sockets.sockets.values())
             .find(s => s.data.user?.id === participantId);
           if (participantSocket) {
-            participantSocket.emit('group_profile_updated', dbStorage.serializeChat(updatedChat));
+            participantSocket.emit('group_profile_updated', serializeChatOut(updatedChat));
           }
         });
 
-        if (callback) callback({ success: true, chat: dbStorage.serializeChat(updatedChat) });
+        if (callback) callback({ success: true, chat: serializeChatOut(updatedChat) });
       } catch (error) {
         console.error('Update group profile error:', error);
         if (callback) callback({ error: 'Failed to update group profile' });
@@ -1555,14 +1572,14 @@ io.on('connection', async (socket) => {
           id: updatedUser.id,
           username: updatedUser.username,
           displayName: updatedUser.displayName,
-          avatar: updatedUser.avatar,
+          avatar: normalizeAvatarUrl(updatedUser.avatar, publicBase) ?? updatedUser.avatar,
           status: updatedUser.status,
           socketId: socket.id
         };
 
         // Send to all clients including the sender
         io.emit('user_profile_updated', updatedSocketUser);
-        io.emit('online_users', dbStorage.getOnlineUsers());
+        io.emit('online_users', normalizeOnlineUsers(dbStorage.getOnlineUsers()));
 
         console.log(`Profile updated and broadcasted: ${updatedUser.displayName}`);
       }
@@ -1592,7 +1609,7 @@ io.on('connection', async (socket) => {
     setTimeout(() => {
       const remainingOnlineUsers = dbStorage.getOnlineUsers();
       console.log('Broadcasting updated online users list after disconnection:', remainingOnlineUsers.map(u => u.displayName));
-      io.emit('online_users', remainingOnlineUsers);
+      io.emit('online_users', normalizeOnlineUsers(remainingOnlineUsers));
     }, 50);
   });
 });
@@ -1648,12 +1665,13 @@ async function keepPigsailOnline() {
     const pigsailUser = await dbStorage.getUserByUsername('pigsail');
     if (!pigsailUser) return;
 
+    const publicBase = getPublicServerBase();
     // Add/refresh pigsail in the in-memory online-users map
     dbStorage.addSocketUser({
       id: pigsailUser.id,
       username: pigsailUser.username,
       displayName: pigsailUser.displayName,
-      avatar: pigsailUser.avatar,
+      avatar: normalizeAvatarUrl(pigsailUser.avatar, publicBase) ?? pigsailUser.avatar,
       status: 'online',
       socketId: 'pigsail-virtual'  // synthetic socket id — never removed on disconnect
     });

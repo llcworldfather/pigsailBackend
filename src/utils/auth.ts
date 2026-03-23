@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { User } from '../types';
+import { normalizeAvatarUrl } from './public-url';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = '7d';
@@ -34,7 +35,14 @@ export const verifyToken = (token: string): any => {
   }
 };
 
-export const createSafeUser = (user: User): Omit<User, 'passwordHash'> => {
+export const createSafeUser = (
+  user: User,
+  publicBase?: string
+): Omit<User, 'passwordHash'> => {
   const { passwordHash, ...safeUser } = user;
-  return safeUser;
+  if (!publicBase) return safeUser;
+  return {
+    ...safeUser,
+    avatar: normalizeAvatarUrl(safeUser.avatar, publicBase) ?? safeUser.avatar
+  };
 };

@@ -1,6 +1,7 @@
 import express from 'express';
 import { dbStorage } from '../utils/db-storage';
 import { verifyToken } from '../utils/auth';
+import { getPublicServerBase, normalizeAvatarUrl } from '../utils/public-url';
 import { ApiResponse } from '../types';
 
 const router = express.Router();
@@ -32,6 +33,7 @@ const authenticateToken = (req: express.Request, res: express.Response, next: ex
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const currentUserId = (req as any).user.id;
+    const publicBase = getPublicServerBase(req);
     const allUsers = await dbStorage.getAllUsers();
 
     // Exclude current user and only return safe user data
@@ -41,7 +43,7 @@ router.get('/', authenticateToken, async (req, res) => {
         id: user.id,
         username: user.username,
         displayName: user.displayName,
-        avatar: user.avatar,
+        avatar: normalizeAvatarUrl(user.avatar, publicBase),
         status: user.status,
         lastSeen: user.lastSeen,
         joinedAt: user.joinedAt
@@ -65,6 +67,7 @@ router.get('/', authenticateToken, async (req, res) => {
 router.get('/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
+    const publicBase = getPublicServerBase(req);
     const user = await dbStorage.getUserById(id);
 
     if (!user) {
@@ -79,7 +82,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       id: user.id,
       username: user.username,
       displayName: user.displayName,
-      avatar: user.avatar,
+      avatar: normalizeAvatarUrl(user.avatar, publicBase),
       status: user.status,
       lastSeen: user.lastSeen,
       joinedAt: user.joinedAt
@@ -134,12 +137,13 @@ router.put('/:id', authenticateToken, async (req, res) => {
             } as ApiResponse);
         }
 
+        const publicBase = getPublicServerBase(req);
         // 返回安全的用户数据（不包含密码哈希）
         const safeUser = {
             id: updatedUser.id,
             username: updatedUser.username,
             displayName: updatedUser.displayName,
-            avatar: updatedUser.avatar,
+            avatar: normalizeAvatarUrl(updatedUser.avatar, publicBase),
             email: updatedUser.email,
             status: updatedUser.status,
             lastSeen: updatedUser.lastSeen,
@@ -163,13 +167,14 @@ router.put('/:id', authenticateToken, async (req, res) => {
 // Get online users
 router.get('/online/list', authenticateToken, async (req, res) => {
   try {
+    const publicBase = getPublicServerBase(req);
     const onlineUsers = dbStorage.getOnlineUsers();
 
     const safeUsers = onlineUsers.map(user => ({
       id: user.id,
       username: user.username,
       displayName: user.displayName,
-      avatar: user.avatar,
+      avatar: normalizeAvatarUrl(user.avatar, publicBase),
       status: user.status
     }));
 

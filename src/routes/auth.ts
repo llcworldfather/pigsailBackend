@@ -1,6 +1,7 @@
 import express from 'express';
 import { dbStorage } from '../utils/db-storage';
 import { hashPassword, comparePassword, generateToken, verifyToken, createSafeUser } from '../utils/auth';
+import { getPublicServerBase, joinPublicPath, normalizeAvatarUrl } from '../utils/public-url';
 import { RegisterRequest, LoginRequest, ApiResponse, Message } from '../types';
 
 const router = express.Router();
@@ -36,9 +37,12 @@ router.post('/register', async (req, res) => {
 
     // Hash password and create user
     const hashedPassword = await hashPassword(password);
-    const base = process.env.SERVER_URL || 'http://localhost:5000';
-    const defaultAvatar = `${base}/random/default-avatar.jpg`;
-    const finalAvatar = avatar || defaultAvatar;
+    const publicBase = getPublicServerBase(req);
+    const defaultAvatar = joinPublicPath(publicBase, '/random/default-avatar.jpg');
+    const finalAvatar =
+      avatar && String(avatar).trim()
+        ? normalizeAvatarUrl(String(avatar).trim(), publicBase) || String(avatar).trim()
+        : defaultAvatar;
 
     const user = await dbStorage.createUser({
       username,
@@ -55,7 +59,7 @@ router.post('/register', async (req, res) => {
 
     // Auto-add pigsail user and send welcome message
     try {
-      await addPigsailAsFriendAndSendWelcome(user);
+      await addPigsailAsFriendAndSendWelcome(user, publicBase);
     } catch (error) {
       console.error('Failed to add pigsail user:', error);
       // Don't fail registration if this fails
@@ -64,7 +68,7 @@ router.post('/register', async (req, res) => {
     res.status(201).json({
       success: true,
       data: {
-        user: createSafeUser(user),
+        user: createSafeUser(user, publicBase),
         token
       },
       message: 'User registered successfully'
@@ -119,7 +123,7 @@ router.post('/login', async (req, res) => {
     res.json({
       success: true,
       data: {
-        user: createSafeUser(user),
+        user: createSafeUser(user, getPublicServerBase(req)),
         token
       },
       message: 'Login successful'
@@ -158,7 +162,7 @@ router.get('/me', async (req, res) => {
 
     res.json({
       success: true,
-      data: createSafeUser(user)
+      data: createSafeUser(user, getPublicServerBase(req))
     } as ApiResponse);
 
   } catch (error) {
@@ -172,13 +176,12 @@ router.get('/me', async (req, res) => {
 // The pigsail avatar is served from the /random static folder on the same server
 const PIGSAIL_AVATAR_PATH = '/random/pigsail-avatar.jpg';
 
-function getPigsailAvatarUrl(): string {
-  const base = process.env.SERVER_URL || 'http://localhost:5000';
-  return `${base}${PIGSAIL_AVATAR_PATH}`;
+function getPigsailAvatarUrl(publicBase: string): string {
+  return joinPublicPath(publicBase, PIGSAIL_AVATAR_PATH);
 }
 
 // Helper function to ensure pigsail user exists and send welcome message
-async function addPigsailAsFriendAndSendWelcome(newUser: any) {
+async function addPigsailAsFriendAndSendWelcome(newUser: any, publicBase: string) {
   const PIGSAIL_USERNAME = 'pigsail';
   const PIGSAIL_DISPLAY_NAME = 'PigSail';
   const WELCOME_MESSAGE = '你好，我是PigSail，PigSail的p，PigSail的Sail';
@@ -195,13 +198,13 @@ async function addPigsailAsFriendAndSendWelcome(newUser: any) {
         displayName: PIGSAIL_DISPLAY_NAME,
         email: 'pigsail@example.com',
         passwordHash: pigsailPasswordHash,
-        avatar: getPigsailAvatarUrl()
+        avatar: getPigsailAvatarUrl(publicBase)
       });
       console.log('Created pigsail user:', pigsailUser);
     } else if (!pigsailUser.avatar || pigsailUser.avatar.includes('ui-avatars.com')) {
       // Patch avatar if it's still the old placeholder
-      await dbStorage.updateUser(pigsailUser.id, { avatar: getPigsailAvatarUrl() });
-      pigsailUser = { ...pigsailUser, avatar: getPigsailAvatarUrl() };
+      await dbStorage.updateUser(pigsailUser.id, { avatar: getPigsailAvatarUrl(publicBase) });
+      pigsailUser = { ...pigsailUser, avatar: getPigsailAvatarUrl(publicBase) };
       console.log('Updated pigsail avatar to custom image');
     }
 
