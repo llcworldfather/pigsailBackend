@@ -40,6 +40,37 @@ export function joinPublicPath(publicBase: string, pathname: string): string {
   return `${base}${path}`;
 }
 
+/** e.g. client bug: "https//firebasestorage..." (missing colon). */
+function fixBrokenSchemePrefix(s: string): string {
+  return s.replace(/^https\/\//i, 'https://').replace(/^http\/\//i, 'http://');
+}
+
+function startsWithIgnoreCase(haystack: string, prefix: string): boolean {
+  return (
+    haystack.length >= prefix.length &&
+    haystack.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase()
+  );
+}
+
+/**
+ * Undo "SERVER_URL + firebaseUrl" with no separator, or with a mangled https prefix.
+ * Example: https://api.koyeb.apphttps//firebasestorage.googleapis.com/...
+ */
+function stripAccidentalPublicBaseBeforeAbsoluteUrl(
+  trimmed: string,
+  base: string
+): string | null {
+  const b = base.replace(/\/$/, '');
+  if (!b || !startsWithIgnoreCase(trimmed, b)) return null;
+  let rest = trimmed.slice(b.length);
+  if (rest.startsWith('/') && /^\/https?\/?\//i.test(rest)) {
+    rest = rest.slice(1);
+  }
+  rest = fixBrokenSchemePrefix(rest);
+  if (/^https?:\/\//i.test(rest)) return rest;
+  return null;
+}
+
 /**
  * Stored avatars are often "/random/..." or "http://localhost:5000/random/...".
  * Browsers on the real frontend need absolute URLs on the API host.
@@ -53,13 +84,22 @@ export function normalizeAvatarUrl(
   }
 
   const base = publicBase.replace(/\/$/, '');
-  const trimmed = String(avatar).trim();
+  let trimmed = String(avatar).trim();
   if (!trimmed) return avatar;
 
+  trimmed = fixBrokenSchemePrefix(trimmed);
+
+  const stripped = stripAccidentalPublicBaseBeforeAbsoluteUrl(trimmed, base);
+  if (stripped) {
+    return normalizeAvatarUrl(stripped, publicBase);
+  }
+
   // Undo accidental "baseURL + absolute URL" concatenation from older clients
-  const doubleUrl = trimmed.match(/^(https?:\/\/[^/]+)(https?:\/\/.+)$/i);
+  const doubleUrl = trimmed.match(
+    /^(https?:\/\/[^/]+)((?:https?:\/\/|https\/\/|http\/\/).+)$/i
+  );
   if (doubleUrl) {
-    return normalizeAvatarUrl(doubleUrl[2], publicBase);
+    return normalizeAvatarUrl(fixBrokenSchemePrefix(doubleUrl[2]), publicBase);
   }
 
   if (trimmed.startsWith('/')) {
@@ -73,8 +113,8 @@ export function normalizeAvatarUrl(
       return `${base}${u.pathname}${u.search}${u.hash}`;
     }
   } catch {
-    return avatar;
+    return trimmed;
   }
 
-  return avatar;
+  return trimmed;
 }

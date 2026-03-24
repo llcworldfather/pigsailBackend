@@ -1,12 +1,64 @@
 import 'dotenv/config';
 import fs from 'fs/promises';
 import path from 'path';
-import {
-  getFirebaseStorageBucket,
-  uploadLocalImageToAvatarBucket
-} from '../utils/avatar-storage';
+
+// =====================================================================
+// ⚠️ 仅你本机一次性使用：跑完 npm run seed-storage-avatars 后请删掉这段配置
+//    （或删掉整个脚本），不要把密钥提交到 Git。
+// =====================================================================
+const ONE_TIME_FIREBASE_LOCAL = {
+  storageBucket: 'pigsail-f5664.firebasestorage.app',
+
+  /** 服务账号 JSON 路径（不要包一层引号；Windows 用 \\ 或 /） */
+  serviceAccountPath:
+    'C:\\Users\\00109151\\Desktop\\pigsail-f5664-firebase-adminsdk-fbsvc-1bc30d4f13.json',
+
+  /**
+   * 若不想放文件，可把服务账号 JSON 整段粘在这里（建议压缩成一行）。
+   * 非空时优先于 serviceAccountPath。
+   */
+  serviceAccountJson: ''
+};
+// =====================================================================
 
 const SYSTEM_FILES = ['default-avatar.jpg', 'pigsail-avatar.jpg'] as const;
+
+/** 去掉用户误加的外层 " 或 '，避免 path 解析错 */
+function normalizeCredentialPath(raw: string): string {
+  let s = raw.trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return path.normalize(s);
+}
+
+function applyOneTimeFirebaseLocal(): void {
+  // 先清掉 .env 里可能存在的配置，否则 firebase.ts 会优先读 FIREBASE_SERVICE_ACCOUNT_JSON=xxx.json
+  delete process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  delete process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+
+  process.env.FIREBASE_STORAGE_BUCKET = ONE_TIME_FIREBASE_LOCAL.storageBucket;
+
+  const jsonInline = ONE_TIME_FIREBASE_LOCAL.serviceAccountJson?.trim();
+  if (jsonInline) {
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON = jsonInline;
+    return;
+  }
+
+  const raw = ONE_TIME_FIREBASE_LOCAL.serviceAccountPath?.trim();
+  if (!raw) {
+    console.error('请在本脚本 ONE_TIME_FIREBASE_LOCAL 里填写 serviceAccountPath 或 serviceAccountJson。');
+    process.exit(1);
+  }
+
+  const p = normalizeCredentialPath(raw);
+  process.env.FIREBASE_SERVICE_ACCOUNT_PATH = path.isAbsolute(p)
+    ? p
+    : path.join(process.cwd(), p);
+}
 
 async function findRandomDir(): Promise<string> {
   const candidates = [
@@ -34,8 +86,15 @@ function safeObjectSegment(filename: string): string {
 }
 
 async function main(): Promise<void> {
+  applyOneTimeFirebaseLocal();
+
+  // 必须在设置好 process.env 之后再加载（否则会先读空环境变量并抛错）
+  const { getFirebaseStorageBucket, uploadLocalImageToAvatarBucket } = await import(
+    '../utils/avatar-storage'
+  );
+
   if (!getFirebaseStorageBucket()) {
-    console.error('请先设置环境变量 FIREBASE_STORAGE_BUCKET，并配置 Firebase 服务账号凭据。');
+    console.error('FIREBASE_STORAGE_BUCKET 未生效。');
     process.exit(1);
   }
 
