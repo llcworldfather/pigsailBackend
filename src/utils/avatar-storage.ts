@@ -2,24 +2,53 @@ import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import admin from './firebase';
-import { joinPublicPath, normalizeAvatarUrl } from './public-url';
+import { gsUriToFirebaseHttpsDownloadUrl, joinPublicPath, normalizeAvatarUrl } from './public-url';
 
 const PIGSAIL_AVATAR_PATH = '/random/pigsail-avatar.jpg';
 
 /**
- * Fixed object paths under FIREBASE_STORAGE_BUCKET (see npm run seed-storage-avatars).
- * gs://pigsail-f5664.firebasestorage.app/avatars/system/default-avatar.jpg
- * gs://pigsail-f5664.firebasestorage.app/avatars/system/pigsail-avatar.jpg
+ * System avatars in Storage (see npm run seed-storage-avatars). Object paths are stable.
+ *
+ * **Env contract (production):** `FIREBASE_STORAGE_DEFAULT_AVATAR_URL` and
+ * `FIREBASE_STORAGE_PIGSAIL_AVATAR_URL` may be set to permanent **gs://** URIs, e.g.
+ *   gs://<bucket>/avatars/system/default-avatar.jpg
+ *   gs://<bucket>/avatars/system/pigsail-avatar.jpg
+ * The server never exposes gs:// to clients: `coerceFirebaseEnvDownloadUrl()` turns them into
+ * `https://firebasestorage.googleapis.com/v0/b/.../o/...?alt=media` (requires Storage rules to
+ * allow read, or use HTTPS+token URLs in env instead).
  */
 export const FIREBASE_SYSTEM_AVATAR_OBJECTS = {
   default: 'avatars/system/default-avatar.jpg',
   pigsail: 'avatars/system/pigsail-avatar.jpg'
 } as const;
 
+/** gs:// URI for the default system avatar when bucket is known (for ops / logging). */
+export function gsUriDefaultSystemAvatar(bucket: string): string {
+  return `gs://${bucket.replace(/^\/+|\/+$/g, '')}/${FIREBASE_SYSTEM_AVATAR_OBJECTS.default}`;
+}
+
+/** gs:// URI for the PigSail system avatar when bucket is known (for ops / logging). */
+export function gsUriPigsailSystemAvatar(bucket: string): string {
+  return `gs://${bucket.replace(/^\/+|\/+$/g, '')}/${FIREBASE_SYSTEM_AVATAR_OBJECTS.pigsail}`;
+}
+
 let cachedDefaultAvatarFromBucket: string | null = null;
 let cachedPigsailAvatarFromBucket: string | null = null;
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Reads `FIREBASE_STORAGE_DEFAULT_AVATAR_URL` / `FIREBASE_STORAGE_PIGSAIL_AVATAR_URL`.
+ * Supports stable **gs://bucket/object** (recommended) or full **https://** download URLs.
+ */
+export function coerceFirebaseEnvDownloadUrl(raw: string | undefined): string | undefined {
+  const t = raw?.trim();
+  if (!t) return undefined;
+  if (t.startsWith('gs://')) {
+    return gsUriToFirebaseHttpsDownloadUrl(t) ?? undefined;
+  }
+  return t;
+}
 
 export function getFirebaseStorageBucket(): string | undefined {
   return process.env.FIREBASE_STORAGE_BUCKET?.trim();
@@ -30,15 +59,15 @@ export function isAvatarStorageEnabled(): boolean {
 }
 
 /**
- * Resolve default / PigSail download URLs from Storage when env overrides are unset.
- * Call once after Firebase is ready (e.g. server startup).
+ * Resolve default / PigSail URLs via Admin (token) only when the corresponding env var is unset.
+ * If env is set to gs:// or https://, coerce handles clients; warm is skipped for that slot.
  */
 export async function warmSystemAvatarUrlsFromFirebase(): Promise<void> {
   cachedDefaultAvatarFromBucket = null;
   cachedPigsailAvatarFromBucket = null;
   if (!getFirebaseStorageBucket()) return;
 
-  if (!process.env.FIREBASE_STORAGE_DEFAULT_AVATAR_URL?.trim()) {
+  if (!coerceFirebaseEnvDownloadUrl(process.env.FIREBASE_STORAGE_DEFAULT_AVATAR_URL)) {
     const url = await getFirebaseDownloadUrlForObject(FIREBASE_SYSTEM_AVATAR_OBJECTS.default);
     if (url) {
       cachedDefaultAvatarFromBucket = url;
@@ -48,7 +77,7 @@ export async function warmSystemAvatarUrlsFromFirebase(): Promise<void> {
     }
   }
 
-  if (!process.env.FIREBASE_STORAGE_PIGSAIL_AVATAR_URL?.trim()) {
+  if (!coerceFirebaseEnvDownloadUrl(process.env.FIREBASE_STORAGE_PIGSAIL_AVATAR_URL)) {
     const url = await getFirebaseDownloadUrlForObject(FIREBASE_SYSTEM_AVATAR_OBJECTS.pigsail);
     if (url) {
       cachedPigsailAvatarFromBucket = url;
@@ -60,14 +89,14 @@ export async function warmSystemAvatarUrlsFromFirebase(): Promise<void> {
 }
 
 export function getDefaultAvatarUrl(publicBase: string): string {
-  const envUrl = process.env.FIREBASE_STORAGE_DEFAULT_AVATAR_URL?.trim();
+  const envUrl = coerceFirebaseEnvDownloadUrl(process.env.FIREBASE_STORAGE_DEFAULT_AVATAR_URL);
   if (envUrl) return envUrl;
   if (cachedDefaultAvatarFromBucket) return cachedDefaultAvatarFromBucket;
   return joinPublicPath(publicBase, '/random/default-avatar.jpg');
 }
 
 export function getPigsailAvatarUrl(publicBase: string): string {
-  const envUrl = process.env.FIREBASE_STORAGE_PIGSAIL_AVATAR_URL?.trim();
+  const envUrl = coerceFirebaseEnvDownloadUrl(process.env.FIREBASE_STORAGE_PIGSAIL_AVATAR_URL);
   if (envUrl) return envUrl;
   if (cachedPigsailAvatarFromBucket) return cachedPigsailAvatarFromBucket;
   return joinPublicPath(publicBase, PIGSAIL_AVATAR_PATH);
@@ -194,6 +223,19 @@ export async function resolveAvatarInput(
   const trimmed = String(avatar).trim();
   if (!trimmed) return trimmed;
 
+  if (trimmed.startsWith('gs://')) {
+    const m = /^gs:\/\/([^/]+)\/(.+)$/i.exec(trimmed);
+    const configured = getFirebaseStorageBucket();
+    if (m && configured && m[1] === configured) {
+      const objectPath = m[2].replace(/^\/+/, '');
+      const withToken = await getFirebaseDownloadUrlForObject(objectPath);
+      if (withToken) return withToken;
+    }
+    const https = gsUriToFirebaseHttpsDownloadUrl(trimmed);
+    if (https) return normalizeAvatarUrl(https, publicBase) ?? https;
+    return trimmed;
+  }
+
   if (trimmed.startsWith('data:image/')) {
     const parsed = parseDataUrl(trimmed);
     if (!parsed) {
@@ -224,6 +266,18 @@ export async function resolveAvatarInputForRegister(
   publicBase: string
 ): Promise<string> {
   const trimmed = String(avatar).trim();
+  if (trimmed.startsWith('gs://')) {
+    const m = /^gs:\/\/([^/]+)\/(.+)$/i.exec(trimmed);
+    const configured = getFirebaseStorageBucket();
+    if (m && configured && m[1] === configured) {
+      const objectPath = m[2].replace(/^\/+/, '');
+      const withToken = await getFirebaseDownloadUrlForObject(objectPath);
+      if (withToken) return withToken;
+    }
+    const https = gsUriToFirebaseHttpsDownloadUrl(trimmed);
+    if (https) return normalizeAvatarUrl(https, publicBase) ?? https;
+    return trimmed;
+  }
   if (trimmed.startsWith('data:image/')) {
     const parsed = parseDataUrl(trimmed);
     if (!parsed) {

@@ -135,10 +135,15 @@ async function main(): Promise<void> {
   }
 
   const bucket = ONE_TIME_FIREBASE_LOCAL.storageBucket;
-  console.log('\n======== 系统头像在 Storage 中的位置（服务端也可仅靠 bucket + Admin SDK 自动解析）========');
-  console.log(`gs://${bucket}/${'avatars/system/default-avatar.jpg'}`);
-  console.log(`gs://${bucket}/${'avatars/system/pigsail-avatar.jpg'}`);
-  console.log('\n可选 .env（覆盖自动解析的下载 URL）：\n');
+  const gsDefault = `gs://${bucket}/avatars/system/default-avatar.jpg`;
+  const gsPigsail = `gs://${bucket}/avatars/system/pigsail-avatar.jpg`;
+
+  console.log('\n======== 生产环境 .env（推荐长期固定为 gs://，与控制台一致）========');
+  console.log('服务端会把 gs:// 转成浏览器可用的 HTTPS，勿把 gs:// 直接给前端。');
+  console.log(`FIREBASE_STORAGE_DEFAULT_AVATAR_URL=${gsDefault}`);
+  console.log(`FIREBASE_STORAGE_PIGSAIL_AVATAR_URL=${gsPigsail}`);
+  console.log(`FIREBASE_STORAGE_BUCKET=${bucket}`);
+  console.log('\n本次上传得到的 HTTPS+token（与上面 gs 二选一即可，不必同时设两种格式）：');
   if (uploadedSystem['default-avatar.jpg']) {
     console.log(`FIREBASE_STORAGE_DEFAULT_AVATAR_URL=${uploadedSystem['default-avatar.jpg']}`);
   }

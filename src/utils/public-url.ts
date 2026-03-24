@@ -40,6 +40,21 @@ export function joinPublicPath(publicBase: string, pathname: string): string {
   return `${base}${path}`;
 }
 
+/**
+ * Browsers cannot load gs:// — convert to Firebase REST download URL (no token).
+ * Used for `FIREBASE_STORAGE_*_AVATAR_URL` when those env vars are gs:// (supported convention).
+ * Requires Storage rules to allow read, or use https+token URLs in env instead.
+ */
+export function gsUriToFirebaseHttpsDownloadUrl(gs: string): string | null {
+  const m = /^gs:\/\/([^/]+)\/(.+)$/i.exec(String(gs).trim());
+  if (!m) return null;
+  const bucket = m[1];
+  const objectPath = m[2].replace(/^\/+/, '');
+  if (!objectPath) return null;
+  const encoded = encodeURIComponent(objectPath);
+  return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media`;
+}
+
 /** e.g. client bug: "https//firebasestorage..." (missing colon). */
 function fixBrokenSchemePrefix(s: string): string {
   return s.replace(/^https\/\//i, 'https://').replace(/^http\/\//i, 'http://');
@@ -88,6 +103,11 @@ export function normalizeAvatarUrl(
   if (!trimmed) return avatar;
 
   trimmed = fixBrokenSchemePrefix(trimmed);
+
+  const fromGs = gsUriToFirebaseHttpsDownloadUrl(trimmed);
+  if (fromGs) {
+    return normalizeAvatarUrl(fromGs, publicBase);
+  }
 
   const stripped = stripAccidentalPublicBaseBeforeAbsoluteUrl(trimmed, base);
   if (stripped) {

@@ -1,5 +1,5 @@
 import { dbStorage } from './db-storage';
-import { getPigsailAvatarUrl } from './avatar-storage';
+import { coerceFirebaseEnvDownloadUrl, getPigsailAvatarUrl } from './avatar-storage';
 
 const PIGSAIL_USERNAME = 'pigsail';
 
@@ -15,7 +15,8 @@ export function pigsailStoredAvatarShouldUpdate(
   if (s.includes('ui-avatars.com')) return true;
   if (/localhost|127\.0\.0\.1/i.test(s)) return true;
   if (/\/random\/pigsail-avatar\.jpg/i.test(s)) return true;
-  const envPig = process.env.FIREBASE_STORAGE_PIGSAIL_AVATAR_URL?.trim();
+  if (s.startsWith('gs://')) return true;
+  const envPig = coerceFirebaseEnvDownloadUrl(process.env.FIREBASE_STORAGE_PIGSAIL_AVATAR_URL);
   if (envPig && s !== envPig) return true;
   if (
     d.includes('firebasestorage.googleapis.com') &&
