@@ -9,7 +9,12 @@ import { dbStorage } from './utils/db-storage';
 import { testConnection } from './utils/firebase';
 import { verifyToken } from './utils/auth';
 import { getPublicServerBase, normalizeAvatarUrl, joinPublicPath } from './utils/public-url';
-import { pickRandomAvatarUrlFromFirebase, resolveAvatarInput } from './utils/avatar-storage';
+import {
+  pickRandomAvatarUrlFromFirebase,
+  resolveAvatarInput,
+  warmSystemAvatarUrlsFromFirebase
+} from './utils/avatar-storage';
+import { ensurePigsailAvatarSynced } from './utils/pigsail-avatar-sync';
 import { AIService } from './services/ai-service';
 import {
   User,
@@ -1720,10 +1725,13 @@ async function startServer() {
     await dbStorage.initialize();
     console.log('✅ Database initialized successfully');
 
+    await warmSystemAvatarUrlsFromFirebase();
+
     server.listen(PORT, async () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📊 Stats: ${JSON.stringify(dbStorage.getStats())}`);
 
+      await ensurePigsailAvatarSynced(getPublicServerBase());
       // Make pigsail appear online immediately and keep it that way
       await keepPigsailOnline();
       setInterval(keepPigsailOnline, 60_000); // refresh every minute

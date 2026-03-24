@@ -6,6 +6,19 @@ import { joinPublicPath, normalizeAvatarUrl } from './public-url';
 
 const PIGSAIL_AVATAR_PATH = '/random/pigsail-avatar.jpg';
 
+/**
+ * Fixed object paths under FIREBASE_STORAGE_BUCKET (see npm run seed-storage-avatars).
+ * gs://pigsail-f5664.firebasestorage.app/avatars/system/default-avatar.jpg
+ * gs://pigsail-f5664.firebasestorage.app/avatars/system/pigsail-avatar.jpg
+ */
+export const FIREBASE_SYSTEM_AVATAR_OBJECTS = {
+  default: 'avatars/system/default-avatar.jpg',
+  pigsail: 'avatars/system/pigsail-avatar.jpg'
+} as const;
+
+let cachedDefaultAvatarFromBucket: string | null = null;
+let cachedPigsailAvatarFromBucket: string | null = null;
+
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 
 export function getFirebaseStorageBucket(): string | undefined {
@@ -16,15 +29,47 @@ export function isAvatarStorageEnabled(): boolean {
   return !!getFirebaseStorageBucket();
 }
 
+/**
+ * Resolve default / PigSail download URLs from Storage when env overrides are unset.
+ * Call once after Firebase is ready (e.g. server startup).
+ */
+export async function warmSystemAvatarUrlsFromFirebase(): Promise<void> {
+  cachedDefaultAvatarFromBucket = null;
+  cachedPigsailAvatarFromBucket = null;
+  if (!getFirebaseStorageBucket()) return;
+
+  if (!process.env.FIREBASE_STORAGE_DEFAULT_AVATAR_URL?.trim()) {
+    const url = await getFirebaseDownloadUrlForObject(FIREBASE_SYSTEM_AVATAR_OBJECTS.default);
+    if (url) {
+      cachedDefaultAvatarFromBucket = url;
+      console.log(
+        `[avatar-storage] Default avatar from Storage: ${FIREBASE_SYSTEM_AVATAR_OBJECTS.default}`
+      );
+    }
+  }
+
+  if (!process.env.FIREBASE_STORAGE_PIGSAIL_AVATAR_URL?.trim()) {
+    const url = await getFirebaseDownloadUrlForObject(FIREBASE_SYSTEM_AVATAR_OBJECTS.pigsail);
+    if (url) {
+      cachedPigsailAvatarFromBucket = url;
+      console.log(
+        `[avatar-storage] PigSail avatar from Storage: ${FIREBASE_SYSTEM_AVATAR_OBJECTS.pigsail}`
+      );
+    }
+  }
+}
+
 export function getDefaultAvatarUrl(publicBase: string): string {
   const envUrl = process.env.FIREBASE_STORAGE_DEFAULT_AVATAR_URL?.trim();
   if (envUrl) return envUrl;
+  if (cachedDefaultAvatarFromBucket) return cachedDefaultAvatarFromBucket;
   return joinPublicPath(publicBase, '/random/default-avatar.jpg');
 }
 
 export function getPigsailAvatarUrl(publicBase: string): string {
   const envUrl = process.env.FIREBASE_STORAGE_PIGSAIL_AVATAR_URL?.trim();
   if (envUrl) return envUrl;
+  if (cachedPigsailAvatarFromBucket) return cachedPigsailAvatarFromBucket;
   return joinPublicPath(publicBase, PIGSAIL_AVATAR_PATH);
 }
 

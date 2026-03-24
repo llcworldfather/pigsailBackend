@@ -7,6 +7,7 @@ import {
   getPigsailAvatarUrl,
   resolveAvatarInputForRegister
 } from '../utils/avatar-storage';
+import { ensurePigsailAvatarSynced } from '../utils/pigsail-avatar-sync';
 import { RegisterRequest, LoginRequest, ApiResponse, Message } from '../types';
 
 const router = express.Router();
@@ -199,12 +200,11 @@ async function addPigsailAsFriendAndSendWelcome(newUser: any, publicBase: string
         avatar: getPigsailAvatarUrl(publicBase)
       });
       console.log('Created pigsail user:', pigsailUser);
-    } else if (!pigsailUser.avatar || pigsailUser.avatar.includes('ui-avatars.com')) {
-      // Patch avatar if it's still the old placeholder
-      await dbStorage.updateUser(pigsailUser.id, { avatar: getPigsailAvatarUrl(publicBase) });
-      pigsailUser = { ...pigsailUser, avatar: getPigsailAvatarUrl(publicBase) };
-      console.log('Updated pigsail avatar to custom image');
     }
+
+    await ensurePigsailAvatarSynced(publicBase);
+    const refreshed = await dbStorage.getUserByUsername(PIGSAIL_USERNAME);
+    if (refreshed) pigsailUser = refreshed;
 
     // Check if private chat already exists between new user and pigsail
     const existingChat = await dbStorage.getPrivateChat(newUser.id, pigsailUser.id);

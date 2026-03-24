@@ -134,7 +134,11 @@ async function main(): Promise<void> {
     console.log('已上传', dest);
   }
 
-  console.log('\n======== 请把下面两行加入服务端 .env（若已上传对应文件）========\n');
+  const bucket = ONE_TIME_FIREBASE_LOCAL.storageBucket;
+  console.log('\n======== 系统头像在 Storage 中的位置（服务端也可仅靠 bucket + Admin SDK 自动解析）========');
+  console.log(`gs://${bucket}/${'avatars/system/default-avatar.jpg'}`);
+  console.log(`gs://${bucket}/${'avatars/system/pigsail-avatar.jpg'}`);
+  console.log('\n可选 .env（覆盖自动解析的下载 URL）：\n');
   if (uploadedSystem['default-avatar.jpg']) {
     console.log(`FIREBASE_STORAGE_DEFAULT_AVATAR_URL=${uploadedSystem['default-avatar.jpg']}`);
   }
