@@ -178,25 +178,75 @@ export class AIService {
   }
 
   /**
+   * 群聊/私聊历史里每条消息的发送者展示名（senderId 为 UUID，不能与字符串 'pigsail' 比较）
+   */
+  private async buildSenderDisplayMap(chat: Chat, messages: Message[]): Promise<Map<string, string>> {
+    const map = new Map<string, string>();
+    if (!this.dbStorage) return map;
+
+    const participantIds = chat.participants || [];
+    const participantUsers = await Promise.all(
+      participantIds.map((id: string) => this.dbStorage.getUserById(id))
+    );
+    participantIds.forEach((id, i) => {
+      const u = participantUsers[i];
+      map.set(id, u ? (u.displayName || u.username || id) : id);
+    });
+
+    const missing = new Set<string>();
+    for (const m of messages) {
+      if (!map.has(m.senderId)) missing.add(m.senderId);
+    }
+    await Promise.all(
+      [...missing].map(async (id) => {
+        const u = await this.dbStorage.getUserById(id);
+        map.set(id, u ? (u.displayName || u.username || id) : '群友');
+      })
+    );
+
+    return map;
+  }
+
+  /**
    * 构建对话上下文
    */
   private async buildContext(message: Message, chat: Chat, sender: User): Promise<string> {
     const recentMessages = await this.getRecentMessages(chat.id);
 
+    if (!this.pigsailUserId) {
+      await this.getPigSailUserId();
+    }
+    const pigsailId = this.pigsailUserId;
+    const senderDisplayMap = await this.buildSenderDisplayMap(chat, recentMessages);
+
     let context = `当前场景：${chat.type === 'private' ? '和' + sender.displayName + '私聊' : '群聊中'}\n`;
-    context += `对方ID：${sender.displayName}（${sender.username}）\n\n`;
+    if (chat.type === 'group') {
+      context += `本条@你的人：${sender.displayName}（@${sender.username}）\n`;
+      context += `说明：下面「最近对话记录」里每条前面的名字才是说话的人，不要当成同一个人。\n\n`;
+    } else {
+      context += `对方：${sender.displayName}（${sender.username}）\n\n`;
+    }
 
     if (recentMessages.length > 0) {
       context += '最近对话记录：\n';
       recentMessages.forEach((msg, index) => {
-        const name = msg.senderId === 'pigsail' ? 'PigSail（你）' : sender.displayName;
+        const isPigSailMsg = !!pigsailId && msg.senderId === pigsailId;
+        const name = isPigSailMsg
+          ? 'PigSail（你）'
+          : (senderDisplayMap.get(msg.senderId) || '群友');
         context += `${index + 1}. ${name}：${msg.content}\n`;
       });
       context += '\n';
     }
 
-    context += `对方刚刚说："${message.content}"\n`;
+    context +=
+      chat.type === 'group'
+        ? `${sender.displayName} 刚刚说："${message.content}"\n`
+        : `对方刚刚说："${message.content}"\n`;
     context += '现在用你的傲娇腹黑萝莉人设回复，记住要大量用颜文字+emoji+网络用语，不能正经！';
+    if (chat.type === 'group') {
+      context += ' 在群聊里要针对上面「本条@你的人」回应，不要张冠李戴。';
+    }
 
     return context;
   }
