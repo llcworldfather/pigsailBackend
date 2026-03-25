@@ -103,6 +103,10 @@ export class MessageDAO {
   // Get messages for a chat, ordered oldest-first, with limit/offset support.
   // Sorting is done client-side to avoid requiring a Firestore composite index
   // on (chatId, createdAt). Deploy firestore.indexes.json to enable server-side ordering.
+  //
+  // offset === 0: return the **most recent** `limit` messages (chat open / refresh).
+  // Previously this used slice(0, limit) which returned the **oldest** 50 — so any
+  // chat with >50 messages showed stale history while the sidebar still showed lastMessage.
   static async findByChatId(chatId: string, limit: number = 50, offset: number = 0): Promise<Message[]> {
     const snapshot = await db.collection(MESSAGES)
       .where('chatId', '==', chatId)
@@ -113,9 +117,37 @@ export class MessageDAO {
       .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
     if (offset === 0) {
-      return sorted.slice(0, limit);
+      return sorted.slice(-limit);
     }
     return sorted.slice(offset, offset + limit);
+  }
+
+  // Load messages older than a specific anchor message (excluding anchor), oldest-first.
+  static async findByChatIdBeforeMessage(
+    chatId: string,
+    beforeMessageId: string,
+    limit: number = 30
+  ): Promise<{ messages: Message[]; hasMore: boolean }> {
+    const snapshot = await db.collection(MESSAGES)
+      .where('chatId', '==', chatId)
+      .get();
+
+    const sorted = snapshot.docs
+      .map(doc => docToMessage(doc.id, doc.data()))
+      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+    if (sorted.length === 0) {
+      return { messages: [], hasMore: false };
+    }
+
+    const anchorIndex = sorted.findIndex(m => m.id === beforeMessageId);
+    const end = anchorIndex >= 0 ? anchorIndex : sorted.length;
+    const start = Math.max(0, end - limit);
+
+    return {
+      messages: sorted.slice(start, end),
+      hasMore: start > 0
+    };
   }
 
   /** 获取最近 N 条消息（用于摘要），按时间正序返回 */
@@ -148,7 +180,9 @@ export class MessageDAO {
     if (idx < 0) return sorted.slice(-limit); // 未找到则返回最近 limit 条
 
     const half = Math.floor(limit / 2);
-    const start = Math.max(0, idx - half);
+    // Keep window size near `limit` even when anchor is close to edges.
+    const maxStart = Math.max(0, sorted.length - limit);
+    const start = Math.max(0, Math.min(idx - half, maxStart));
     const end = Math.min(sorted.length, start + limit);
     return sorted.slice(start, end);
   }
@@ -318,22 +352,29 @@ export class MessageDAO {
       .slice(0, limit);
   }
 
-  // Paginated message retrieval
+  // Paginated message retrieval (page 1 = newest window; aligns with findByChatId offset 0)
   static async getMessagesWithPagination(
     chatId: string,
     page: number = 1,
     limit: number = 50
   ): Promise<{ messages: Message[]; total: number; hasMore: boolean }> {
-    const offset = (page - 1) * limit;
-    const [messages, total] = await Promise.all([
-      this.findByChatId(chatId, limit, offset),
-      this.getMessageCount(chatId)
-    ]);
+    const snapshot = await db.collection(MESSAGES)
+      .where('chatId', '==', chatId)
+      .get();
+
+    const sorted = snapshot.docs
+      .map(doc => docToMessage(doc.id, doc.data()))
+      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+    const total = sorted.length;
+    const endExclusive = total - (page - 1) * limit;
+    const start = Math.max(0, endExclusive - limit);
+    const messages = endExclusive <= 0 ? [] : sorted.slice(start, endExclusive);
 
     return {
       messages,
       total,
-      hasMore: offset + messages.length < total
+      hasMore: start > 0
     };
   }
 

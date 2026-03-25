@@ -112,6 +112,14 @@ class DatabaseStorage {
     return await MessageDAO.findByChatId(chatId, limit);
   }
 
+  async getMessagesBeforeMessage(
+    chatId: string,
+    beforeMessageId: string,
+    limit = 30
+  ): Promise<{ messages: Message[]; hasMore: boolean }> {
+    return await MessageDAO.findByChatIdBeforeMessage(chatId, beforeMessageId, limit);
+  }
+
   /** 以某条消息为窗口末尾，向前取最多 limit 条（时间正序） */
   async getMessagesEndingAtMessage(chatId: string, anchorMessageId: string, limit = 50): Promise<Message[]> {
     return await MessageDAO.findByChatIdEndingAtMessage(chatId, anchorMessageId, limit);

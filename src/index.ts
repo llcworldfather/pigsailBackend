@@ -479,6 +479,41 @@ io.on('connection', async (socket) => {
     }
   });
 
+  // Load older messages than a given anchor (pagination for upward scrolling)
+  socket.on(
+    'load_older_messages',
+    async (
+      data: { chatId: string; beforeMessageId: string; limit?: number },
+      callback?: (res: { success?: boolean; messages?: Message[]; hasMore?: boolean; error?: string }) => void
+    ) => {
+      const respond = (payload: { success?: boolean; messages?: Message[]; hasMore?: boolean; error?: string }) => {
+        if (callback) callback(payload);
+      };
+
+      try {
+        const chatId = data?.chatId;
+        const beforeMessageId = data?.beforeMessageId;
+        if (!chatId || !beforeMessageId) {
+          respond({ error: '缺少参数' });
+          return;
+        }
+
+        const chat = await dbStorage.getChatById(chatId);
+        if (!chat || !chat.participants.includes(user.id)) {
+          respond({ error: 'Chat not found or access denied' });
+          return;
+        }
+
+        const limit = typeof data.limit === 'number' && data.limit > 0 ? Math.min(data.limit, 100) : 30;
+        const result = await dbStorage.getMessagesBeforeMessage(chatId, beforeMessageId, limit);
+        respond({ success: true, messages: result.messages, hasMore: result.hasMore });
+      } catch (error) {
+        console.error('Load older messages error:', error);
+        respond({ error: 'Failed to load older messages' });
+      }
+    }
+  );
+
   // 预览上下文：以某条消息为「最新一条」，仅用于弹窗，不触发 chat_messages_loaded
   socket.on(
     'preview_chat_messages',
