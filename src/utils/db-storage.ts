@@ -1,5 +1,5 @@
 import { UserDAO, ChatDAO, MessageDAO, FriendRequestDAO } from '../dao';
-import { User, Message, Chat, SocketUser, TypingUser, FriendRequest } from '../types';
+import { User, Message, Chat, SocketUser, TypingUser, FriendRequest, DebateConfig, DebateState } from '../types';
 
 class DatabaseStorage {
   // Online users - still keep in memory for socket management
@@ -98,6 +98,10 @@ class DatabaseStorage {
     updates: { name?: string; avatar?: string }
   ): Promise<Chat | null> {
     return await ChatDAO.updateGroupProfile(chatId, updates);
+  }
+
+  async updateDebateState(chatId: string, debateState: DebateState, debateConfig?: DebateConfig): Promise<boolean> {
+    return await ChatDAO.updateDebateState(chatId, debateState, debateConfig);
   }
 
   // Message methods - delegated to MessageDAO

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { User, Chat, Message } from '../types';
+import { User, Chat, Message, DebateConfig, DebateMessageMeta, DEBATE_TURN_SPECS } from '../types';
 
 /**
  * AI 上下文中展示发送者：「展示名 (@登录账号)」，同名不同人可凭账号区分。
@@ -40,6 +40,11 @@ export class AIService {
    * 检查是否应该生成AI回复
    */
   async shouldGenerateAIResponse(message: Message, chat: Chat, sender: User): Promise<boolean> {
+    // AI 辩论群：不触发 PigSail
+    if (chat.type === 'group' && chat.debateConfig) {
+      return false;
+    }
+
     // 如果发送者是pigsail自己，不回复
     if (sender.username === 'pigsail') {
       return false;
@@ -951,6 +956,136 @@ ${lines.join('\n')}
     ];
 
     return responses[Math.floor(Math.random() * responses.length)];
+  }
+
+  private debateLineLabel(meta: DebateMessageMeta): string {
+    const pos = meta.role === 'first' ? '一辩' : meta.role === 'second' ? '二辩' : '三辩';
+    return (meta.side === 'affirmative' ? '正方' : '反方') + pos;
+  }
+
+  private buildDebateTranscript(prior: Message[], _config: DebateConfig): string {
+    const lines: string[] = [];
+    for (const m of prior) {
+      if (!m.debate || m.isDeleted) continue;
+      const label = this.debateLineLabel(m.debate);
+      lines.push(`${label}：${(m.content || '').trim()}`);
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * 辩论回合流式生成（独立 system prompt，非 PigSail 人设）
+   */
+  async generateDebateSpeechStream(
+    chat: Chat,
+    turnIndex: number,
+    priorDebateMessages: Message[],
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    const config = chat.debateConfig;
+    if (!config || turnIndex < 0 || turnIndex >= DEBATE_TURN_SPECS.length) {
+      return '';
+    }
+
+    const spec = DEBATE_TURN_SPECS[turnIndex];
+    const personaIdx = spec.meta.round - 1;
+    const persona =
+      spec.meta.side === 'affirmative'
+        ? config.affirmativePersonas[personaIdx]
+        : config.negativePersonas[personaIdx];
+
+    const sideZh = spec.meta.side === 'affirmative' ? '正方' : '反方';
+    const transcript = this.buildDebateTranscript(priorDebateMessages, config);
+    const isOpeningRound = turnIndex === 0;
+
+    const closingInstruction = isOpeningRound
+      ? `本轮为全场首轮发言，目前尚无任何对方辩手发言。请做立论陈述：开门见山阐明你方对辩题的立场、核心论点与主要论据；可简要说明论证结构。**严禁**编造「对方辩友刚才说…」「对方反复强调…」等虚构的对方发言或交锋；只正面论证己方。字数约 400–900 字。只输出辩论正文，不要标题或旁白。`
+      : transcript
+        ? `请结合上方【已有发言记录】完成本轮发言：可针对对方论点反驳、补充己方论证或作阶段小结（符合你的席位职责）。不得无视已有发言凭空假设对方观点。字数约 400–900 字为宜。只输出辩论正文，不要标题或旁白。`
+        : `请完成本轮发言，推进己方立场；若尚无前序辩词记录则侧重阐述与交锋预备，不要虚构「对方已发言」的内容。字数约 400–900 字为宜。只输出辩论正文，不要标题或旁白。`;
+
+    const systemContent = `你是中文辩论赛辩手。全程使用简体中文，语体为正式辩论赛场发言，禁止使用卖萌颜文字、故意搞笑网络烂梗、过量 emoji。
+辩题：「${config.topic}」
+你代表：${sideZh}
+你的席位：${this.debateLineLabel(spec.meta)}
+人设与风格要求（须体现）：${persona || '（未指定则按该席位常见职责发挥）'}
+${transcript ? `\n【已有发言记录】\n${transcript}\n` : ''}
+${closingInstruction}`;
+
+    const userContent = '请输出你的本轮发言正文。';
+
+    if (this.config.provider === 'deepseek' && this.config.apiKey) {
+      return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
+    }
+
+    const fallback = `【${sideZh}${this.debateLineLabel(spec.meta).replace(/^正方|反方/, '')}】（API 未配置，占位发言）关于「${config.topic}」，我方坚持立场并与对方商榷，因服务不可用无法生成完整辩稿。`;
+    for (const char of fallback) {
+      onChunk(char);
+      await new Promise(r => setTimeout(r, 8));
+    }
+    return fallback;
+  }
+
+  private async streamDeepSeekDebate(
+    systemContent: string,
+    userContent: string,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    if (!this.config.apiKey) throw new Error('DeepSeek API key not configured');
+
+    const response = await axios.post(
+      'https://api.deepseek.com/v1/chat/completions',
+      {
+        model: this.config.model || 'deepseek-chat',
+        messages: [
+          { role: 'system', content: systemContent },
+          { role: 'user', content: userContent }
+        ],
+        max_tokens: 2000,
+        temperature: 0.75,
+        top_p: 0.9,
+        stream: true
+      },
+      {
+        responseType: 'stream',
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 120000
+      }
+    );
+
+    return new Promise<string>((resolve, reject) => {
+      let fullContent = '';
+      let buffer = '';
+
+      response.data.on('data', (raw: Buffer) => {
+        buffer += raw.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const payload = trimmed.slice(6).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(payload);
+            const token: string = parsed.choices?.[0]?.delta?.content ?? '';
+            if (token) {
+              fullContent += token;
+              onChunk(token);
+            }
+          } catch {
+            // skip
+          }
+        }
+      });
+
+      response.data.on('end', () => resolve(fullContent.trim() || '（本轮发言生成失败，请重试。）'));
+      response.data.on('error', reject);
+    });
   }
 }
 

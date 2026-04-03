@@ -10,6 +10,30 @@ export interface User {
   passwordHash: string;
 }
 
+/** 辩论消息元数据（AI 辩手发言） */
+export interface DebateMessageMeta {
+  side: 'affirmative' | 'negative';
+  round: 1 | 2 | 3;
+  role: 'first' | 'second' | 'third';
+}
+
+export interface DebateConfig {
+  topic: string;
+  affirmativePersonas: [string, string, string];
+  negativePersonas: [string, string, string];
+}
+
+export type DebatePhase = 'pending' | 'debating' | 'voting' | 'closed';
+
+export interface DebateState {
+  phase: DebatePhase;
+  /** 下一待生成回合索引 0–5；辩论未开始或结束后用于展示进度 */
+  currentTurnIndex: number;
+  votes: Record<string, 'affirmative' | 'negative'>;
+  voteCounts?: { affirmative: number; negative: number };
+  winner?: 'affirmative' | 'negative' | 'tie';
+}
+
 export interface Message {
   id: string;
   senderId: string;
@@ -25,6 +49,7 @@ export interface Message {
   deletedAt?: Date;
   deletedBy?: string;
   reactions: Record<string, string[]>;
+  debate?: DebateMessageMeta;
 }
 
 export interface Chat {
@@ -37,6 +62,8 @@ export interface Chat {
   createdAt: Date;
   lastMessage?: Message;
   unreadCounts: Map<string, number>;
+  debateConfig?: DebateConfig;
+  debateState?: DebateState;
 }
 
 export interface SocketUser {
@@ -52,6 +79,11 @@ export interface CreateGroupData {
   name: string;
   participantIds: string[];
   avatar?: string;
+  /** AI 辩论群：需同时提供辩题与 6 段人设 */
+  debateMode?: boolean;
+  debateTopic?: string;
+  affirmativePersonas?: string[];
+  negativePersonas?: string[];
 }
 
 export interface TypingUser {
@@ -93,3 +125,13 @@ export interface LoginRequest {
   username: string;
   password: string;
 }
+
+/** 单轮发言顺序：正一→反一→正二→反二→正三→反三 */
+export const DEBATE_TURN_SPECS: ReadonlyArray<{ senderId: string; meta: DebateMessageMeta }> = [
+  { senderId: 'debate_ai_aff_1', meta: { side: 'affirmative', round: 1, role: 'first' } },
+  { senderId: 'debate_ai_neg_1', meta: { side: 'negative', round: 1, role: 'first' } },
+  { senderId: 'debate_ai_aff_2', meta: { side: 'affirmative', round: 2, role: 'second' } },
+  { senderId: 'debate_ai_neg_2', meta: { side: 'negative', round: 2, role: 'second' } },
+  { senderId: 'debate_ai_aff_3', meta: { side: 'affirmative', round: 3, role: 'third' } },
+  { senderId: 'debate_ai_neg_3', meta: { side: 'negative', round: 3, role: 'third' } }
+];

@@ -1,5 +1,5 @@
 import { db, FieldValue, Timestamp } from '../utils/firebase';
-import { Chat } from '../types';
+import { Chat, DebateConfig, DebateState } from '../types';
 import { DocumentData } from 'firebase-admin/firestore';
 
 const CHATS = 'chats';
@@ -31,6 +31,28 @@ function docToChat(id: string, data: DocumentData): Chat {
     };
   }
 
+  let debateConfig: DebateConfig | undefined;
+  const dc = data.debateConfig as DocumentData | undefined;
+  if (dc && typeof dc.topic === 'string' && Array.isArray(dc.affirmativePersonas) && Array.isArray(dc.negativePersonas)) {
+    debateConfig = {
+      topic: dc.topic,
+      affirmativePersonas: dc.affirmativePersonas as [string, string, string],
+      negativePersonas: dc.negativePersonas as [string, string, string]
+    };
+  }
+
+  let debateState: DebateState | undefined;
+  const ds = data.debateState as DocumentData | undefined;
+  if (ds && typeof ds.phase === 'string') {
+    debateState = {
+      phase: ds.phase as DebateState['phase'],
+      currentTurnIndex: typeof ds.currentTurnIndex === 'number' ? ds.currentTurnIndex : 0,
+      votes: (ds.votes as Record<string, 'affirmative' | 'negative'>) || {},
+      voteCounts: ds.voteCounts as DebateState['voteCounts'],
+      winner: ds.winner as DebateState['winner']
+    };
+  }
+
   return {
     id,
     type: data.type as 'private' | 'group',
@@ -40,7 +62,9 @@ function docToChat(id: string, data: DocumentData): Chat {
     adminId: data.adminId || undefined,
     createdAt: data.createdAt?.toDate() || new Date(),
     lastMessage,
-    unreadCounts
+    unreadCounts,
+    debateConfig,
+    debateState
   };
 }
 
@@ -58,7 +82,7 @@ export class ChatDAO {
       };
     }
 
-    const docData = {
+    const docData: Record<string, unknown> = {
       type: chatData.type,
       name: chatData.name || null,
       avatar: chatData.avatar || null,
@@ -71,6 +95,23 @@ export class ChatDAO {
       updatedAt: now
     };
 
+    if (chatData.debateConfig) {
+      docData.debateConfig = {
+        topic: chatData.debateConfig.topic,
+        affirmativePersonas: chatData.debateConfig.affirmativePersonas,
+        negativePersonas: chatData.debateConfig.negativePersonas
+      };
+    }
+    if (chatData.debateState) {
+      docData.debateState = {
+        phase: chatData.debateState.phase,
+        currentTurnIndex: chatData.debateState.currentTurnIndex,
+        votes: chatData.debateState.votes || {},
+        voteCounts: chatData.debateState.voteCounts || null,
+        winner: chatData.debateState.winner || null
+      };
+    }
+
     await db.collection(CHATS).doc(chatData.id).set(docData);
 
     return {
@@ -82,7 +123,9 @@ export class ChatDAO {
       adminId: chatData.adminId,
       createdAt: now.toDate(),
       lastMessage: undefined,
-      unreadCounts: new Map()
+      unreadCounts: new Map(),
+      debateConfig: chatData.debateConfig,
+      debateState: chatData.debateState
     };
   }
 
@@ -240,6 +283,32 @@ export class ChatDAO {
           ? FieldValue.increment(1)
           : FieldValue.increment(-1)
       });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  static async updateDebateState(chatId: string, debateState: DebateState, debateConfig?: DebateConfig): Promise<boolean> {
+    try {
+      const update: Record<string, unknown> = {
+        debateState: {
+          phase: debateState.phase,
+          currentTurnIndex: debateState.currentTurnIndex,
+          votes: debateState.votes || {},
+          voteCounts: debateState.voteCounts ?? null,
+          winner: debateState.winner ?? null
+        },
+        updatedAt: Timestamp.now()
+      };
+      if (debateConfig) {
+        update.debateConfig = {
+          topic: debateConfig.topic,
+          affirmativePersonas: debateConfig.affirmativePersonas,
+          negativePersonas: debateConfig.negativePersonas
+        };
+      }
+      await db.collection(CHATS).doc(chatId).update(update);
       return true;
     } catch {
       return false;

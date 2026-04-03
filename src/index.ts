@@ -23,7 +23,10 @@ import {
   SocketUser,
   CreateGroupData,
   TypingUser,
-  ApiResponse
+  ApiResponse,
+  DebateConfig,
+  DebateState,
+  DEBATE_TURN_SPECS
 } from './types';
 
 // Import routes
@@ -89,6 +92,77 @@ function parseChineseOrArabicNumber(value: string): number | null {
   }
   const direct = CHINESE_DIGITS[value];
   return typeof direct === 'number' ? direct : null;
+}
+
+/**
+ * 从 create_group 载荷解析辩论选项。兼容：数组被序列化成 {0,1,2} 对象、snake_case 字段名、debateMode 字符串等。
+ */
+function parseDebateFromCreateGroupPayload(
+  groupData: CreateGroupData & Record<string, unknown>
+):
+  | { kind: 'none' }
+  | { kind: 'debate'; debateConfig: DebateConfig; debateState: DebateState }
+  | { kind: 'error'; message: string } {
+  const raw = groupData as Record<string, unknown>;
+  const topic = String(raw.debateTopic ?? raw.debate_topic ?? '').trim();
+
+  const toStrList = (v: unknown): string[] => {
+    if (Array.isArray(v)) {
+      return v.map((x) => String(x ?? '').trim()).filter(Boolean);
+    }
+    if (v != null && typeof v === 'object' && !Array.isArray(v)) {
+      const o = v as Record<string, unknown>;
+      return Object.keys(o)
+        .filter((k) => /^\d+$/.test(k))
+        .sort((a, b) => Number(a) - Number(b))
+        .map((k) => String(o[k] ?? '').trim())
+        .filter(Boolean);
+    }
+    return [];
+  };
+
+  const aff = toStrList(raw.affirmativePersonas ?? raw.affirmative_personas);
+  const neg = toStrList(raw.negativePersonas ?? raw.negative_personas);
+  const modeRaw = raw.debateMode ?? raw.debate_mode;
+
+  const strictComplete = topic.length > 0 && aff.length >= 3 && neg.length >= 3;
+
+  const explicitOn =
+    modeRaw === true ||
+    modeRaw === 1 ||
+    (typeof modeRaw === 'string' && modeRaw.toLowerCase() === 'true');
+  const explicitOff =
+    modeRaw === false ||
+    modeRaw === 0 ||
+    (typeof modeRaw === 'string' && modeRaw.toLowerCase() === 'false');
+
+  if (explicitOff) {
+    return { kind: 'none' };
+  }
+
+  const wantsDebate = explicitOn || strictComplete;
+
+  if (!wantsDebate) {
+    return { kind: 'none' };
+  }
+
+  if (!strictComplete) {
+    return { kind: 'error', message: '辩论群需填写辩题与正反方各三名辩手人设' };
+  }
+
+  return {
+    kind: 'debate',
+    debateConfig: {
+      topic,
+      affirmativePersonas: [aff[0], aff[1], aff[2]],
+      negativePersonas: [neg[0], neg[1], neg[2]]
+    },
+    debateState: {
+      phase: 'pending',
+      currentTurnIndex: 0,
+      votes: {}
+    }
+  };
 }
 
 // Allowed origins for CORS (localhost + optional CORS_ORIGINS=comma,separated,urls)
@@ -260,6 +334,7 @@ io.on('connection', async (socket) => {
     return s;
   };
   const serializeChatsOut = (chats: Chat[]) => chats.map(serializeChatOut);
+
   const normalizeOnlineUsers = (list: SocketUser[]) =>
     list.map((u) => ({
       ...u,
@@ -269,6 +344,93 @@ io.on('connection', async (socket) => {
   console.log(`User connected: ${user.displayName} (${user.id})`);
   const getParticipantSocket = (participantId: string) =>
     Array.from(io.sockets.sockets.values()).find(s => s.data.user?.id === participantId);
+
+  const broadcastDebateChatToParticipants = (chat: Chat) => {
+    const serialized = serializeChatOut(chat);
+    chat.participants.forEach((pid) => {
+      const sock = getParticipantSocket(pid);
+      if (sock) sock.emit('debate_state_updated', { chat: serialized });
+    });
+  };
+
+  const runDebateSequence = async (chatId: string) => {
+    const debateReplyGapMs = 30_000;
+    for (let turn = 0; turn < DEBATE_TURN_SPECS.length; turn++) {
+      if (turn > 0) {
+        await new Promise((resolve) => setTimeout(resolve, debateReplyGapMs));
+      }
+      const chatFresh = await dbStorage.getChatById(chatId);
+      if (!chatFresh?.debateConfig || chatFresh.debateState?.phase !== 'debating') {
+        return;
+      }
+
+      const spec = DEBATE_TURN_SPECS[turn];
+      const allMsgs = await dbStorage.getMessagesByChatId(chatId, 100_000);
+      const priorDebate = allMsgs
+        .filter((m) => m.debate && !m.isDeleted)
+        .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+      const msgId = Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+      const placeholderMsg: Message = {
+        id: msgId,
+        senderId: spec.senderId,
+        chatId,
+        content: '',
+        timestamp: new Date(),
+        type: 'text',
+        readBy: [spec.senderId],
+        isEdited: false,
+        isDeleted: false,
+        reactions: {},
+        debate: spec.meta
+      };
+
+      const emitToChat = (event: string, data: unknown) => {
+        chatFresh.participants.forEach((pid) => {
+          const sock = getParticipantSocket(pid);
+          if (sock) sock.emit(event, data);
+        });
+      };
+
+      emitToChat('ai_stream_start', { message: placeholderMsg });
+
+      let fullContent = '';
+      try {
+        fullContent = await aiService.generateDebateSpeechStream(
+          chatFresh,
+          turn,
+          priorDebate,
+          (chunk: string) => emitToChat('ai_stream_chunk', { messageId: msgId, chatId, chunk })
+        );
+      } catch (err) {
+        console.error('Debate turn error:', err);
+        fullContent = '（本轮 AI 发言失败，请稍后由群主重新尝试开始辩论或联系管理员。）';
+        emitToChat('ai_stream_chunk', { messageId: msgId, chatId, chunk: fullContent });
+      }
+
+      const finalMsg: Message = {
+        ...placeholderMsg,
+        content: fullContent || '（空发言）'
+      };
+
+      await dbStorage.addMessage(finalMsg);
+      emitToChat('ai_stream_end', { message: finalMsg });
+
+      const nextIndex = turn + 1;
+      const nextPhase: DebateState['phase'] = nextIndex >= DEBATE_TURN_SPECS.length ? 'voting' : 'debating';
+      const prevState = chatFresh.debateState!;
+      const newState: DebateState = {
+        ...prevState,
+        phase: nextPhase,
+        currentTurnIndex: nextIndex
+      };
+
+      await dbStorage.updateDebateState(chatId, newState);
+      const updatedChat = await dbStorage.getChatById(chatId);
+      if (updatedChat) broadcastDebateChatToParticipants(updatedChat);
+    }
+  };
+
   const toSafeUser = (targetUser: User) => ({
     id: targetUser.id,
     username: targetUser.username,
@@ -868,22 +1030,57 @@ io.on('connection', async (socket) => {
   // Create group chat
   socket.on('create_group', async (groupData: CreateGroupData) => {
     try {
-      const participantIds = [user.id, ...groupData.participantIds];
+      if (!groupData || typeof groupData !== 'object' || Array.isArray(groupData)) {
+        socket.emit('error', { message: '无效的建群数据' });
+        return;
+      }
+      const participantIds = [user.id, ...(groupData.participantIds || [])];
+
+      let debateConfig: DebateConfig | undefined;
+      let debateState: DebateState | undefined;
+
+      const debateParsed = parseDebateFromCreateGroupPayload(
+        groupData as CreateGroupData & Record<string, unknown>
+      );
+      const raw = groupData as unknown as Record<string, unknown>;
+      console.log('[create_group]', {
+        userId: user.id,
+        payloadKeys: Object.keys(groupData as object),
+        debateParseKind: debateParsed.kind,
+        rawDebateMode: raw.debateMode,
+        rawTopicLen: String(raw.debateTopic ?? '').length
+      });
+      if (debateParsed.kind === 'error') {
+        console.warn('[create_group] 辩论参数无效:', debateParsed.message);
+        socket.emit('error', { message: debateParsed.message });
+        return;
+      }
+      if (debateParsed.kind === 'debate') {
+        debateConfig = debateParsed.debateConfig;
+        debateState = debateParsed.debateState;
+        console.log('[create_group] 已解析为 AI 辩论群', { topic: debateConfig.topic?.slice(0, 48) });
+      }
 
       const chat = await dbStorage.createChat({
         type: 'group',
         name: groupData.name,
         avatar: groupData.avatar,
         participants: participantIds,
-        adminId: user.id
+        adminId: user.id,
+        debateConfig,
+        debateState
       });
+
+      const systemContent = debateConfig
+        ? `${user.displayName} 创建了 AI 辩论群「${chat.name}」。辩题：「${debateConfig.topic}」。请群主点击「开始辩论」后，正反方 AI 辩手将依次发言。`
+        : `${user.displayName} created the group "${chat.name}"`;
 
       // Send system message
       const systemMessage: Message = {
         id: Math.random().toString(36).substr(2, 9) + Date.now().toString(36),
         senderId: 'system',
         chatId: chat.id,
-        content: `${user.displayName} created the group "${chat.name}"`,
+        content: systemContent,
         timestamp: new Date(),
         type: 'system',
         readBy: participantIds,
@@ -912,6 +1109,146 @@ io.on('connection', async (socket) => {
       socket.emit('error', { message: 'Failed to create group' });
     }
   });
+
+  socket.on(
+    'debate_start',
+    async (data: { chatId: string }, callback?: (payload: unknown) => void) => {
+      try {
+        const chat = await dbStorage.getChatById(data.chatId);
+        if (!chat || chat.type !== 'group' || !chat.participants.includes(user.id)) {
+          if (callback) callback({ error: '群聊不存在或无权访问' });
+          return;
+        }
+        if (!chat.debateConfig || !chat.debateState) {
+          if (callback) callback({ error: '不是 AI 辩论群' });
+          return;
+        }
+        if (chat.adminId !== user.id) {
+          if (callback) callback({ error: '仅群主可以开始辩论' });
+          return;
+        }
+        if (chat.debateState.phase !== 'pending') {
+          if (callback) callback({ error: '辩论已开始或已结束' });
+          return;
+        }
+
+        const nextState: DebateState = {
+          ...chat.debateState,
+          phase: 'debating',
+          currentTurnIndex: 0,
+          votes: chat.debateState.votes || {}
+        };
+        await dbStorage.updateDebateState(chat.id, nextState);
+        const refreshed = await dbStorage.getChatById(chat.id);
+        if (refreshed) broadcastDebateChatToParticipants(refreshed);
+
+        if (callback) callback({ success: true });
+        void runDebateSequence(chat.id);
+      } catch (e) {
+        console.error('debate_start error:', e);
+        if (callback) callback({ error: '开始辩论失败' });
+      }
+    }
+  );
+
+  socket.on(
+    'submit_debate_vote',
+    async (
+      data: { chatId: string; side: 'affirmative' | 'negative' },
+      callback?: (payload: unknown) => void
+    ) => {
+      try {
+        const chat = await dbStorage.getChatById(data.chatId);
+        if (!chat || chat.type !== 'group' || !chat.participants.includes(user.id)) {
+          if (callback) callback({ error: '群聊不存在或无权访问' });
+          return;
+        }
+        if (!chat.debateConfig || !chat.debateState) {
+          if (callback) callback({ error: '不是 AI 辩论群' });
+          return;
+        }
+        if (chat.debateState.phase !== 'voting') {
+          if (callback) callback({ error: '当前不在投票阶段' });
+          return;
+        }
+        if (chat.debateState.votes[user.id]) {
+          if (callback) callback({ error: '您已投过票' });
+          return;
+        }
+        if (data.side !== 'affirmative' && data.side !== 'negative') {
+          if (callback) callback({ error: '无效的投票选项' });
+          return;
+        }
+
+        const votes = { ...chat.debateState.votes, [user.id]: data.side };
+        const votedCount = Object.keys(votes).length;
+        const allIn = chat.participants.length;
+
+        if (votedCount < allIn) {
+          const partial: DebateState = {
+            ...chat.debateState,
+            votes
+          };
+          await dbStorage.updateDebateState(chat.id, partial);
+          const refreshed = await dbStorage.getChatById(chat.id);
+          if (refreshed) broadcastDebateChatToParticipants(refreshed);
+          if (callback) callback({ success: true });
+          return;
+        }
+
+        let aff = 0;
+        let neg = 0;
+        for (const uid of chat.participants) {
+          const v = votes[uid];
+          if (v === 'affirmative') aff++;
+          else if (v === 'negative') neg++;
+        }
+        const winner: DebateState['winner'] =
+          aff === neg ? 'tie' : aff > neg ? 'affirmative' : 'negative';
+        const winText =
+          winner === 'tie' ? '平局' : winner === 'affirmative' ? '正方获胜' : '反方获胜';
+
+        const closed: DebateState = {
+          ...chat.debateState,
+          phase: 'closed',
+          votes,
+          currentTurnIndex: 6,
+          voteCounts: { affirmative: aff, negative: neg },
+          winner
+        };
+        await dbStorage.updateDebateState(chat.id, closed);
+
+        const sysMsg: Message = {
+          id: Math.random().toString(36).substr(2, 9) + Date.now().toString(36),
+          senderId: 'system',
+          chatId: chat.id,
+          content: `投票结束：正方 ${aff} 票，反方 ${neg} 票。结果：${winText}。`,
+          timestamp: new Date(),
+          type: 'system',
+          readBy: chat.participants,
+          isEdited: false,
+          isDeleted: false,
+          reactions: {}
+        };
+        await dbStorage.addMessage(sysMsg);
+
+        chat.participants.forEach((pid) => {
+          const sock = getParticipantSocket(pid);
+          if (sock) {
+            sock.emit('new_message', sysMsg);
+          }
+        });
+
+        const refreshed = await dbStorage.getChatById(chat.id);
+        if (refreshed) broadcastDebateChatToParticipants(refreshed);
+
+        if (callback) callback({ success: true });
+      } catch (e) {
+        console.error('submit_debate_vote error:', e);
+        if (callback) callback({ error: '投票失败' });
+      }
+    }
+  );
 
   // Add members to an existing group chat (admin only)
   socket.on(
@@ -1146,6 +1483,11 @@ io.on('connection', async (socket) => {
           socket.emit('error', { message: 'Reply target message not found' });
           return;
         }
+      }
+
+      if (chat.type === 'group' && chat.debateConfig) {
+        socket.emit('error', { message: 'AI 辩论群内不可发送消息' });
+        return;
       }
 
       const message: Message = {
@@ -1430,6 +1772,10 @@ io.on('connection', async (socket) => {
         const chat = await dbStorage.getChatById(chatId);
         if (!chat || chat.type !== 'group' || !chat.participants.includes(user.id)) {
           fail('群聊不存在或无权访问');
+          return;
+        }
+        if (chat.debateConfig) {
+          fail('AI 辩论群不支持 PigSail 摘要');
           return;
         }
 

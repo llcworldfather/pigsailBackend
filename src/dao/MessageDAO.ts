@@ -1,11 +1,20 @@
 import { db, FieldValue, Timestamp } from '../utils/firebase';
-import { Message } from '../types';
+import { DebateMessageMeta, Message } from '../types';
 import { DocumentData } from 'firebase-admin/firestore';
 
 const MESSAGES = 'messages';
 const CHATS = 'chats';
 
 function docToMessage(id: string, data: DocumentData): Message {
+  let debate: DebateMessageMeta | undefined;
+  const dm = data.debate as DocumentData | undefined;
+  if (dm && dm.side && dm.round && dm.role) {
+    debate = {
+      side: dm.side as DebateMessageMeta['side'],
+      round: dm.round as DebateMessageMeta['round'],
+      role: dm.role as DebateMessageMeta['role']
+    };
+  }
   return {
     id,
     chatId: data.chatId,
@@ -20,7 +29,8 @@ function docToMessage(id: string, data: DocumentData): Message {
     isDeleted: data.isDeleted || false,
     deletedAt: data.deletedAt?.toDate?.(),
     deletedBy: data.deletedBy || undefined,
-    reactions: (data.reactions as Record<string, string[]>) || {}
+    reactions: (data.reactions as Record<string, string[]>) || {},
+    debate
   };
 }
 
@@ -29,7 +39,7 @@ export class MessageDAO {
   static async create(messageData: Omit<Message, 'readBy' | 'isEdited'>): Promise<Message> {
     const now = Timestamp.now();
 
-    const docData = {
+    const docData: Record<string, unknown> = {
       chatId: messageData.chatId,
       senderId: messageData.senderId,
       content: messageData.content,
@@ -45,6 +55,13 @@ export class MessageDAO {
       createdAt: now,
       updatedAt: now
     };
+    if (messageData.debate) {
+      docData.debate = {
+        side: messageData.debate.side,
+        round: messageData.debate.round,
+        role: messageData.debate.role
+      };
+    }
 
     await db.collection(MESSAGES).doc(messageData.id).set(docData);
 
@@ -96,7 +113,8 @@ export class MessageDAO {
       deletedAt: undefined,
       deletedBy: undefined,
       editedAt: undefined,
-      reactions: messageData.reactions || {}
+      reactions: messageData.reactions || {},
+      debate: messageData.debate
     };
   }
 
