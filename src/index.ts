@@ -15,7 +15,7 @@ import {
   warmSystemAvatarUrlsFromFirebase
 } from './utils/avatar-storage';
 import { ensurePigsailAvatarSynced } from './utils/pigsail-avatar-sync';
-import { AIService } from './services/ai-service';
+import { AIService, formatSenderLabelForAIContext } from './services/ai-service';
 import {
   User,
   Message,
@@ -1439,7 +1439,7 @@ io.on('connection', async (socket) => {
         const senderDisplayNames = new Map<string, string>();
         for (const sid of senderIds) {
           const u = await dbStorage.getUserById(sid);
-          senderDisplayNames.set(sid, u?.displayName || u?.username || sid);
+          senderDisplayNames.set(sid, u ? formatSenderLabelForAIContext(u, sid) : sid);
         }
         senderDisplayNames.set('system', '系统');
 

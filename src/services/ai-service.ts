@@ -1,6 +1,20 @@
 import axios from 'axios';
 import { User, Chat, Message } from '../types';
 
+/**
+ * AI 上下文中展示发送者：「展示名 (@登录账号)」，同名不同人可凭账号区分。
+ */
+export function formatSenderLabelForAIContext(
+  user: Pick<User, 'displayName' | 'username'> | null | undefined,
+  fallbackId: string
+): string {
+  if (!user) return fallbackId;
+  const display = (user.displayName || user.username || '').trim() || fallbackId;
+  const uname = (user.username || '').trim();
+  if (!uname) return display;
+  return `${display} (@${uname})`;
+}
+
 export interface AIConfig {
   provider: 'openai' | 'claude' | 'ollama' | 'glm' | 'deepseek';
   apiKey?: string;
@@ -190,7 +204,7 @@ export class AIService {
     );
     participantIds.forEach((id, i) => {
       const u = participantUsers[i];
-      map.set(id, u ? (u.displayName || u.username || id) : id);
+      map.set(id, u ? formatSenderLabelForAIContext(u, id) : id);
     });
 
     const missing = new Set<string>();
@@ -200,11 +214,19 @@ export class AIService {
     await Promise.all(
       [...missing].map(async (id) => {
         const u = await this.dbStorage.getUserById(id);
-        map.set(id, u ? (u.displayName || u.username || id) : '群友');
+        map.set(id, u ? formatSenderLabelForAIContext(u, id) : '群友');
       })
     );
 
     return map;
+  }
+
+  /** 与群聊摘要一致：本地化日期时间，供模型理解对话先后 */
+  private formatMessageTimestamp(timestamp: Date | string | undefined): string {
+    if (timestamp == null) return '时间未知';
+    const d = timestamp instanceof Date ? timestamp : new Date(timestamp);
+    if (Number.isNaN(d.getTime())) return String(timestamp);
+    return d.toLocaleString('zh-CN');
   }
 
   /**
@@ -219,12 +241,13 @@ export class AIService {
     const pigsailId = this.pigsailUserId;
     const senderDisplayMap = await this.buildSenderDisplayMap(chat, recentMessages);
 
-    let context = `当前场景：${chat.type === 'private' ? '和' + sender.displayName + '私聊' : '群聊中'}\n`;
+    const senderLabel = formatSenderLabelForAIContext(sender, sender.id);
+    let context = `当前场景：${chat.type === 'private' ? '和 ' + senderLabel + ' 私聊' : '群聊中'}\n`;
     if (chat.type === 'group') {
-      context += `本条@你的人：${sender.displayName}（@${sender.username}）\n`;
-      context += `说明：下面「最近对话记录」里每条前面的名字才是说话的人，不要当成同一个人。\n\n`;
+      context += `本条@你的人：${senderLabel}\n`;
+      context += `说明：下面「最近对话记录」每条为 [时间] 展示名(@账号)：正文；同名用户凭括号内账号区分，不要把不同人当成同一人。\n\n`;
     } else {
-      context += `对方：${sender.displayName}（${sender.username}）\n\n`;
+      context += `对方：${senderLabel}\n\n`;
     }
 
     if (recentMessages.length > 0) {
@@ -234,15 +257,17 @@ export class AIService {
         const name = isPigSailMsg
           ? 'PigSail（你）'
           : (senderDisplayMap.get(msg.senderId) || '群友');
-        context += `${index + 1}. ${name}：${msg.content}\n`;
+        const timeStr = this.formatMessageTimestamp(msg.timestamp);
+        context += `${index + 1}. [${timeStr}] ${name}：${msg.content}\n`;
       });
       context += '\n';
     }
 
+    const triggerTime = this.formatMessageTimestamp(message.timestamp);
     context +=
       chat.type === 'group'
-        ? `${sender.displayName} 刚刚说："${message.content}"\n`
-        : `对方刚刚说："${message.content}"\n`;
+        ? `${senderLabel} 刚刚（${triggerTime}）说："${message.content}"\n`
+        : `对方刚刚（${triggerTime}）说："${message.content}"\n`;
     context += '现在用你的傲娇腹黑萝莉人设回复，记住要大量用颜文字+emoji+网络用语，不能正经！';
     if (chat.type === 'group') {
       context += ' 在群聊里要针对上面「本条@你的人」回应，不要张冠李戴。';
@@ -663,7 +688,7 @@ export class AIService {
     const lines = textMessages.slice(-100).map(m => {
       const name = senderDisplayNames.get(m.senderId) || m.senderId;
       const content = (m.content || '').trim().slice(0, 500);
-      const time = m.timestamp instanceof Date ? m.timestamp.toLocaleString('zh-CN') : String(m.timestamp);
+      const time = this.formatMessageTimestamp(m.timestamp);
       return `[${time}] ${name}：${content}`;
     });
 
