@@ -221,12 +221,12 @@ export class AIService {
     return map;
   }
 
-  /** 与群聊摘要一致：本地化日期时间，供模型理解对话先后 */
+  /** 与群聊摘要一致：东八区时间，供模型理解对话先后（勿用默认时区：云端 Node 常为 UTC，会把 11:33 写成 03:33） */
   private formatMessageTimestamp(timestamp: Date | string | undefined): string {
     if (timestamp == null) return '时间未知';
     const d = timestamp instanceof Date ? timestamp : new Date(timestamp);
     if (Number.isNaN(d.getTime())) return String(timestamp);
-    return d.toLocaleString('zh-CN');
+    return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
   }
 
   /**
