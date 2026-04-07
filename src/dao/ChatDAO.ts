@@ -49,7 +49,8 @@ function docToChat(id: string, data: DocumentData): Chat {
       currentTurnIndex: typeof ds.currentTurnIndex === 'number' ? ds.currentTurnIndex : 0,
       votes: (ds.votes as Record<string, 'affirmative' | 'negative'>) || {},
       voteCounts: ds.voteCounts as DebateState['voteCounts'],
-      winner: ds.winner as DebateState['winner']
+      winner: ds.winner as DebateState['winner'],
+      judgeVerdict: ds.judgeVerdict as DebateState['judgeVerdict']
     };
   }
 
@@ -108,7 +109,8 @@ export class ChatDAO {
         currentTurnIndex: chatData.debateState.currentTurnIndex,
         votes: chatData.debateState.votes || {},
         voteCounts: chatData.debateState.voteCounts || null,
-        winner: chatData.debateState.winner || null
+        winner: chatData.debateState.winner || null,
+        judgeVerdict: chatData.debateState.judgeVerdict ?? null
       };
     }
 
@@ -297,7 +299,8 @@ export class ChatDAO {
           currentTurnIndex: debateState.currentTurnIndex,
           votes: debateState.votes || {},
           voteCounts: debateState.voteCounts ?? null,
-          winner: debateState.winner ?? null
+          winner: debateState.winner ?? null,
+          judgeVerdict: debateState.judgeVerdict ?? null
         },
         updatedAt: Timestamp.now()
       };

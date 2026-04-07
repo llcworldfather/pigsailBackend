@@ -15,7 +15,7 @@ import {
   warmSystemAvatarUrlsFromFirebase
 } from './utils/avatar-storage';
 import { ensurePigsailAvatarSynced } from './utils/pigsail-avatar-sync';
-import { AIService, formatSenderLabelForAIContext } from './services/ai-service';
+import { AIService, formatSenderLabelForAIContext, parseDebateJudgeVerdictLine } from './services/ai-service';
 import {
   User,
   Message,
@@ -44,10 +44,17 @@ if (!DEEPSEEK_API_KEY) {
 } else {
   console.log('🔑 DeepSeek API key loaded');
 }
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+if (OPENROUTER_API_KEY) {
+  console.log('🔑 OpenRouter API key loaded (AI 辩论)');
+}
 const aiService = new AIService({
   provider: 'deepseek',
   model: 'deepseek-chat',
-  apiKey: DEEPSEEK_API_KEY
+  apiKey: DEEPSEEK_API_KEY,
+  openRouterApiKey: OPENROUTER_API_KEY,
+  openRouterDebateModel:
+    process.env.OPENROUTER_DEBATE_MODEL || 'meta-llama/llama-3.3-70b-instruct:free'
 }, dbStorage);
 
 const CHINESE_DIGITS: Record<string, number> = {
@@ -417,7 +424,8 @@ io.on('connection', async (socket) => {
       emitToChat('ai_stream_end', { message: finalMsg });
 
       const nextIndex = turn + 1;
-      const nextPhase: DebateState['phase'] = nextIndex >= DEBATE_TURN_SPECS.length ? 'voting' : 'debating';
+      const nextPhase: DebateState['phase'] =
+        nextIndex >= DEBATE_TURN_SPECS.length ? 'judging' : 'debating';
       const prevState = chatFresh.debateState!;
       const newState: DebateState = {
         ...prevState,
@@ -429,6 +437,92 @@ io.on('connection', async (socket) => {
       const updatedChat = await dbStorage.getChatById(chatId);
       if (updatedChat) broadcastDebateChatToParticipants(updatedChat);
     }
+
+    await runDebateJudgeVerdict(chatId);
+  };
+
+  const runDebateJudgeVerdict = async (chatId: string) => {
+    const chatFresh = await dbStorage.getChatById(chatId);
+    if (!chatFresh?.debateConfig || chatFresh.debateState?.phase !== 'judging') {
+      return;
+    }
+
+    const pigsailUser = await dbStorage.getUserByUsername('pigsail');
+    if (!pigsailUser) {
+      console.error('[debate] pigsail user not found, skip judge verdict');
+      const st = chatFresh.debateState!;
+      await dbStorage.updateDebateState(chatId, {
+        ...st,
+        phase: 'voting'
+      });
+      const refreshed = await dbStorage.getChatById(chatId);
+      if (refreshed) broadcastDebateChatToParticipants(refreshed);
+      return;
+    }
+
+    const allMsgs = await dbStorage.getMessagesByChatId(chatId, 100_000);
+    const priorDebate = allMsgs
+      .filter((m) => m.debate && !m.isDeleted)
+      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+    const msgId = Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+    const placeholderMsg: Message = {
+      id: msgId,
+      senderId: pigsailUser.id,
+      chatId,
+      content: '',
+      timestamp: new Date(),
+      type: 'text',
+      readBy: [pigsailUser.id],
+      isEdited: false,
+      isDeleted: false,
+      reactions: {},
+      debateJudge: true
+    };
+
+    const emitToChat = (event: string, data: unknown) => {
+      chatFresh.participants.forEach((pid) => {
+        const sock = getParticipantSocket(pid);
+        if (sock) sock.emit(event, data);
+      });
+    };
+
+    emitToChat('ai_stream_start', { message: placeholderMsg });
+
+    let fullContent = '';
+    try {
+      fullContent = await aiService.generateDebateJudgeVerdictStream(
+        chatFresh,
+        priorDebate,
+        (chunk: string) => emitToChat('ai_stream_chunk', { messageId: msgId, chatId, chunk })
+      );
+    } catch (err) {
+      console.error('Debate judge error:', err);
+      fullContent =
+        '人家裁判麦断了啦！(╯°□°）╯ 算平局吧…\nVERDICT:tie';
+      emitToChat('ai_stream_chunk', { messageId: msgId, chatId, chunk: fullContent });
+    }
+
+    const { displayContent, verdict } = parseDebateJudgeVerdictLine(fullContent);
+    const finalMsg: Message = {
+      ...placeholderMsg,
+      content: displayContent || '（裁判发言生成失败。）'
+    };
+
+    await dbStorage.addMessage(finalMsg);
+    emitToChat('ai_stream_end', { message: finalMsg });
+
+    const prevState = chatFresh.debateState!;
+    const newState: DebateState = {
+      ...prevState,
+      phase: 'voting',
+      currentTurnIndex: prevState.currentTurnIndex,
+      judgeVerdict: verdict ?? undefined
+    };
+
+    await dbStorage.updateDebateState(chatId, newState);
+    const updatedChat = await dbStorage.getChatById(chatId);
+    if (updatedChat) broadcastDebateChatToParticipants(updatedChat);
   };
 
   const toSafeUser = (targetUser: User) => ({

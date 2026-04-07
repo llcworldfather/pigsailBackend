@@ -20,6 +20,9 @@ export interface AIConfig {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  /** 仅用于 AI 辩论流式生成（OpenRouter） */
+  openRouterApiKey?: string;
+  openRouterDebateModel?: string;
 }
 
 export class AIService {
@@ -1014,6 +1017,9 @@ ${closingInstruction}`;
 
     const userContent = '请输出你的本轮发言正文。';
 
+    if (this.config.openRouterApiKey) {
+      return await this.streamOpenRouterDebate(systemContent, userContent, onChunk);
+    }
     if (this.config.provider === 'deepseek' && this.config.apiKey) {
       return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
     }
@@ -1024,6 +1030,90 @@ ${closingInstruction}`;
       await new Promise(r => setTimeout(r, 8));
     }
     return fallback;
+  }
+
+  /**
+   * 双方辩手发言结束后：PigSail 人设裁判流式点评（与辩手正式语体不同）
+   */
+  async generateDebateJudgeVerdictStream(
+    chat: Chat,
+    priorDebateMessages: Message[],
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    const config = chat.debateConfig;
+    if (!config) return '';
+
+    const transcript = this.buildDebateTranscript(priorDebateMessages, config);
+    const systemContent = `${this.getSystemPrompt()}
+
+【本场特殊任务：AI 辩论赛裁判】
+- 上面是 PigSail 的平时人设；本场你要当裁判，全程仍须保持 PigSail 口吻（傲娇、腹黑、萝莉、颜文字与梗）。
+- 裁判环节可以分析论点与交锋，但禁止变成严肃公文或客服腔；点评里仍要阴阳怪气、可吐槽双方。
+- 本条回复不受平时「禁止超过150字」限制，写够把双方优缺点说清楚。
+- 在全部正文结束后，必须另起一行，且该行仅含以下之一（供系统解析，勿加其它字符或空格后缀）：
+VERDICT:affirmative
+或
+VERDICT:negative
+或
+VERDICT:tie`;
+
+    const userContent = `辩题：「${config.topic}」
+
+【完整发言记录】
+${transcript || '（无记录）'}`;
+
+    if (this.config.openRouterApiKey) {
+      return await this.streamOpenRouterDebate(systemContent, userContent, onChunk);
+    }
+    if (this.config.provider === 'deepseek' && this.config.apiKey) {
+      return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
+    }
+
+    const fallback =
+      '哼～人家随便看看…正方反方都菜！(ﾉ◕ヮ◕)ﾉ 算平局啦！\nVERDICT:tie';
+    for (const char of fallback) {
+      onChunk(char);
+      await new Promise(r => setTimeout(r, 8));
+    }
+    return fallback;
+  }
+
+  private async streamOpenRouterDebate(
+    systemContent: string,
+    userContent: string,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    if (!this.config.openRouterApiKey) throw new Error('OpenRouter API key not configured');
+
+    const model =
+      this.config.openRouterDebateModel || 'meta-llama/llama-3.3-70b-instruct:free';
+
+    const response = await axios.post(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        model,
+        messages: [
+          { role: 'system', content: systemContent },
+          { role: 'user', content: userContent }
+        ],
+        max_tokens: 2000,
+        temperature: 0.75,
+        top_p: 0.9,
+        stream: true
+      },
+      {
+        responseType: 'stream',
+        headers: {
+          Authorization: `Bearer ${this.config.openRouterApiKey}`,
+          'Content-Type': 'application/json',
+          Referer: process.env.SERVER_URL || 'http://localhost:5000',
+          'X-Title': 'chat-app debate'
+        },
+        timeout: 120000
+      }
+    );
+
+    return this.consumeOpenAICompatibleSseStream(response, onChunk);
   }
 
   private async streamDeepSeekDebate(
@@ -1056,6 +1146,14 @@ ${closingInstruction}`;
       }
     );
 
+    return this.consumeOpenAICompatibleSseStream(response, onChunk);
+  }
+
+  /** DeepSeek / OpenRouter 等均使用 OpenAI 兼容的 SSE 流格式 */
+  private consumeOpenAICompatibleSseStream(
+    response: { data: NodeJS.ReadableStream },
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       let fullContent = '';
       let buffer = '';
@@ -1087,5 +1185,24 @@ ${closingInstruction}`;
       response.data.on('error', reject);
     });
   }
+}
+
+/** 从裁判回复末尾解析 VERDICT:* 并去掉该行，供入库展示 */
+export function parseDebateJudgeVerdictLine(fullContent: string): {
+  displayContent: string;
+  verdict: 'affirmative' | 'negative' | 'tie' | null;
+} {
+  const trimmed = fullContent.trim();
+  const lines = trimmed.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    const m = /^VERDICT:(affirmative|negative|tie)$/i.exec(line);
+    if (m) {
+      const verdict = m[1].toLowerCase() as 'affirmative' | 'negative' | 'tie';
+      const displayContent = lines.slice(0, i).join('\n').trim();
+      return { displayContent: displayContent || trimmed, verdict };
+    }
+  }
+  return { displayContent: trimmed, verdict: null };
 }
 

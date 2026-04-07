@@ -23,7 +23,7 @@ export interface DebateConfig {
   negativePersonas: [string, string, string];
 }
 
-export type DebatePhase = 'pending' | 'debating' | 'voting' | 'closed';
+export type DebatePhase = 'pending' | 'debating' | 'judging' | 'voting' | 'closed';
 
 export interface DebateState {
   phase: DebatePhase;
@@ -32,6 +32,8 @@ export interface DebateState {
   votes: Record<string, 'affirmative' | 'negative'>;
   voteCounts?: { affirmative: number; negative: number };
   winner?: 'affirmative' | 'negative' | 'tie';
+  /** PigSail 裁判在发言末行 VERDICT:* 解析结果 */
+  judgeVerdict?: 'affirmative' | 'negative' | 'tie';
 }
 
 export interface Message {
@@ -50,6 +52,8 @@ export interface Message {
   deletedBy?: string;
   reactions: Record<string, string[]>;
   debate?: DebateMessageMeta;
+  /** PigSail 辩论裁判发言（非辩手席位） */
+  debateJudge?: boolean;
 }
 
 export interface Chat {

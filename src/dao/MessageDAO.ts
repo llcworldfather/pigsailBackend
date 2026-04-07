@@ -30,7 +30,8 @@ function docToMessage(id: string, data: DocumentData): Message {
     deletedAt: data.deletedAt?.toDate?.(),
     deletedBy: data.deletedBy || undefined,
     reactions: (data.reactions as Record<string, string[]>) || {},
-    debate
+    debate,
+    debateJudge: data.debateJudge === true
   };
 }
 
@@ -61,6 +62,9 @@ export class MessageDAO {
         round: messageData.debate.round,
         role: messageData.debate.role
       };
+    }
+    if (messageData.debateJudge) {
+      docData.debateJudge = true;
     }
 
     await db.collection(MESSAGES).doc(messageData.id).set(docData);
@@ -114,7 +118,8 @@ export class MessageDAO {
       deletedBy: undefined,
       editedAt: undefined,
       reactions: messageData.reactions || {},
-      debate: messageData.debate
+      debate: messageData.debate,
+      debateJudge: messageData.debateJudge
     };
   }
 
