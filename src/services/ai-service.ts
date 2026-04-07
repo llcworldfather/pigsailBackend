@@ -20,9 +20,12 @@ export interface AIConfig {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
-  /** 仅用于 AI 辩论流式生成（OpenRouter） */
+  /** 仅用于 AI 辩论流式生成（OpenRouter，低优先级） */
   openRouterApiKey?: string;
   openRouterDebateModel?: string;
+  /** 仅用于 AI 辩论流式生成（Google Gemini，高优先级） */
+  geminiApiKey?: string;
+  geminiDebateModel?: string;
 }
 
 export class AIService {
@@ -1001,22 +1004,38 @@ ${lines.join('\n')}
     const transcript = this.buildDebateTranscript(priorDebateMessages, config);
     const isOpeningRound = turnIndex === 0;
 
-    const closingInstruction = isOpeningRound
-      ? `本轮为全场首轮发言，目前尚无任何对方辩手发言。请做立论陈述：开门见山阐明你方对辩题的立场、核心论点与主要论据；可简要说明论证结构。**严禁**编造「对方辩友刚才说…」「对方反复强调…」等虚构的对方发言或交锋；只正面论证己方。字数约 400–900 字。只输出辩论正文，不要标题或旁白。`
-      : transcript
-        ? `请结合上方【已有发言记录】完成本轮发言：可针对对方论点反驳、补充己方论证或作阶段小结（符合你的席位职责）。不得无视已有发言凭空假设对方观点。字数约 400–900 字为宜。只输出辩论正文，不要标题或旁白。`
-        : `请完成本轮发言，推进己方立场；若尚无前序辩词记录则侧重阐述与交锋预备，不要虚构「对方已发言」的内容。字数约 400–900 字为宜。只输出辩论正文，不要标题或旁白。`;
+    const personaBlock =
+      (persona && persona.trim()) ||
+      '（未填写人设：请按「' +
+        this.debateLineLabel(spec.meta) +
+        '」常见职责与正式辩论赛风格发言。）';
 
-    const systemContent = `你是中文辩论赛辩手。全程使用简体中文，语体为正式辩论赛场发言，禁止使用卖萌颜文字、故意搞笑网络烂梗、过量 emoji。
+    const closingInstruction = isOpeningRound
+      ? `【本轮任务】在充分体现上述人设的前提下完成立论：首轮尚无对方发言，请开门见山阐明立场、核心论点与论据；可简要说明论证结构。**严禁**编造对方已发言的内容。字数约 400–900 字。只输出辩论正文，不要标题或旁白。`
+      : transcript
+        ? `【本轮任务】在充分体现上述人设的前提下，结合【已有发言记录】发言：可反驳、补充己方论证或阶段小结。不得无视记录凭空假设对方观点。字数约 400–900 字。只输出辩论正文，不要标题或旁白。`
+        : `【本轮任务】在充分体现上述人设的前提下完成本轮发言；若记录为空则侧重立论与交锋预备，不要虚构「对方已发言」。字数约 400–900 字。只输出辩论正文，不要标题或旁白。`;
+
+    const systemContent = `【核心：创建者为你设定的人设】（最高优先级）
+你必须以该人设为「身份与表达」的主轴：语气、修辞习惯、价值立场、自称与口头禅、知识背景与举例风格，均须优先服从下列描述；若与「赛场格式」有冲突，以人设为准；人设未覆盖的细节再用正式辩论赛常识补全。
+
+${personaBlock}
+
+【辩题与席位】
 辩题：「${config.topic}」
 你代表：${sideZh}
 你的席位：${this.debateLineLabel(spec.meta)}
-人设与风格要求（须体现）：${persona || '（未指定则按该席位常见职责发挥）'}
+
+【赛场格式】（在人设之下尽量遵守）
+全程使用简体中文；语体须与上述人设协调——若人设偏严肃则保持赛场正式感，若人设允许口语化亦可适度体现，但避免与身份严重违和的卖萌颜文字、无意义网络烂梗、过量 emoji（除非人设本身要求）。
 ${transcript ? `\n【已有发言记录】\n${transcript}\n` : ''}
 ${closingInstruction}`;
 
-    const userContent = '请输出你的本轮发言正文。';
+    const userContent = '请严格按创建者人设输出你的本轮发言正文。';
 
+    if (this.config.geminiApiKey) {
+      return await this.streamGeminiDebate(systemContent, userContent, onChunk);
+    }
     if (this.config.openRouterApiKey) {
       return await this.streamOpenRouterDebate(systemContent, userContent, onChunk);
     }
@@ -1062,6 +1081,9 @@ VERDICT:tie`;
 【完整发言记录】
 ${transcript || '（无记录）'}`;
 
+    if (this.config.geminiApiKey) {
+      return await this.streamGeminiDebate(systemContent, userContent, onChunk);
+    }
     if (this.config.openRouterApiKey) {
       return await this.streamOpenRouterDebate(systemContent, userContent, onChunk);
     }
@@ -1076,6 +1098,123 @@ ${transcript || '（无记录）'}`;
       await new Promise(r => setTimeout(r, 8));
     }
     return fallback;
+  }
+
+  /**
+   * Google Gemini SSE 流式辩论（高优先级）。
+   * 端点：POST /v1beta/models/{model}:streamGenerateContent?alt=sse&key={key}
+   * 响应格式：data: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
+   * 对 429/503 做指数退避重试。
+   */
+  private async streamGeminiDebate(
+    systemContent: string,
+    userContent: string,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    if (!this.config.geminiApiKey) throw new Error('Gemini API key not configured');
+
+    const model = this.config.geminiDebateModel || 'gemini-3.1-flash-lite-preview';
+    // 预览模型（*-preview）走 v1beta；正式稳定模型走 v1
+    const apiVersion = model.includes('preview') ? 'v1beta' : 'v1';
+    const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${model}:streamGenerateContent?alt=sse&key=${this.config.geminiApiKey}`;
+
+    const payload = {
+      systemInstruction: { parts: [{ text: systemContent }] },
+      contents: [{ role: 'user', parts: [{ text: userContent }] }],
+      generationConfig: {
+        maxOutputTokens: 2048,
+        temperature: 0.75,
+        topP: 0.9
+      }
+    };
+
+    const maxAttempts = Math.min(20, Math.max(1, Number(process.env.GEMINI_MAX_RETRIES) || 5));
+    const baseDelayMs = Math.max(1000, Number(process.env.GEMINI_RETRY_BASE_MS) || 3000);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const response = await axios.post(url, payload, {
+        responseType: 'stream',
+        validateStatus: () => true,
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 120000
+      });
+
+      if (response.status === 200) {
+        return this.consumeGeminiSseStream(response.data as NodeJS.ReadableStream, onChunk);
+      }
+
+      const errBody = await this.readStreamToString(response.data as NodeJS.ReadableStream);
+
+      if (response.status === 429 || response.status === 503) {
+        let waitMs = Math.min(120_000, baseDelayMs * 2 ** (attempt - 1));
+        const ra = response.headers['retry-after'];
+        if (ra != null) {
+          const sec = parseInt(String(ra), 10);
+          if (!Number.isNaN(sec) && sec > 0) waitMs = Math.max(waitMs, sec * 1000);
+        }
+        console.warn(
+          `[Gemini] HTTP ${response.status}，${waitMs}ms 后第 ${attempt}/${maxAttempts} 次重试`,
+          errBody.slice(0, 200)
+        );
+        if (attempt >= maxAttempts) {
+          throw new Error(
+            `Gemini 限流(HTTP ${response.status})，已重试 ${maxAttempts} 次。响应: ${errBody.slice(0, 400)}`
+          );
+        }
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+
+      throw new Error(`Gemini HTTP ${response.status}: ${errBody.slice(0, 600)}`);
+    }
+
+    throw new Error('Gemini: 重试耗尽');
+  }
+
+  /** 解析 Gemini SSE 流（data: {...} 行，取 candidates[0].content.parts[].text） */
+  private consumeGeminiSseStream(
+    stream: NodeJS.ReadableStream,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      let fullContent = '';
+      let buffer = '';
+
+      stream.on('data', (raw: Buffer) => {
+        buffer += raw.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const jsonStr = trimmed.slice(6).trim();
+          if (!jsonStr || jsonStr === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(jsonStr);
+            if (parsed.error) {
+              reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+              return;
+            }
+            const parts: Array<{ text?: string }> =
+              parsed.candidates?.[0]?.content?.parts ?? [];
+            for (const part of parts) {
+              if (part.text) {
+                fullContent += part.text;
+                onChunk(part.text);
+              }
+            }
+          } catch {
+            // skip malformed SSE JSON
+          }
+        }
+      });
+
+      stream.on('end', () =>
+        resolve(fullContent.trim() || '（本轮发言生成失败，请重试。）')
+      );
+      stream.on('error', reject);
+    });
   }
 
   private async readStreamToString(stream: NodeJS.ReadableStream): Promise<string> {

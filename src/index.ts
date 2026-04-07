@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import axios from 'axios';
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -46,7 +47,11 @@ if (!DEEPSEEK_API_KEY) {
 }
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 if (OPENROUTER_API_KEY) {
-  console.log('🔑 OpenRouter API key loaded (AI 辩论)');
+  console.log('🔑 OpenRouter API key loaded (AI 辩论 fallback)');
+}
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (GEMINI_API_KEY) {
+  console.log('🔑 Gemini API key loaded (AI 辩论)');
 }
 const aiService = new AIService({
   provider: 'deepseek',
@@ -54,8 +59,29 @@ const aiService = new AIService({
   apiKey: DEEPSEEK_API_KEY,
   openRouterApiKey: OPENROUTER_API_KEY,
   openRouterDebateModel:
-    process.env.OPENROUTER_DEBATE_MODEL || 'meta-llama/llama-3.3-70b-instruct:free'
+    process.env.OPENROUTER_DEBATE_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
+  geminiApiKey: GEMINI_API_KEY,
+  geminiDebateModel: process.env.GEMINI_DEBATE_MODEL || 'gemini-3.1-flash-lite-preview'
 }, dbStorage);
+
+// 启动时验证 Gemini key
+if (GEMINI_API_KEY) {
+  const _geminiModel = process.env.GEMINI_DEBATE_MODEL || 'gemini-3.1-flash-lite-preview';
+  const _apiVer = _geminiModel.includes('preview') ? 'v1beta' : 'v1';
+  axios.post(
+    `https://generativelanguage.googleapis.com/${_apiVer}/models/${_geminiModel}:generateContent?key=${GEMINI_API_KEY}`,
+    { contents: [{ role: 'user', parts: [{ text: 'hi' }] }], generationConfig: { maxOutputTokens: 8 } },
+    { headers: { 'Content-Type': 'application/json' }, timeout: 15000, validateStatus: () => true }
+  ).then((r) => {
+    if (r.status === 200) {
+      console.log(`✅ Gemini key OK（${_geminiModel}）`);
+    } else {
+      console.error(`❌ Gemini key 验证失败 HTTP ${r.status}:`, JSON.stringify(r.data).slice(0, 200));
+    }
+  }).catch((e: any) => {
+    console.error('❌ Gemini 连接测试失败:', e.message);
+  });
+}
 
 const CHINESE_DIGITS: Record<string, number> = {
   '零': 0,
@@ -414,8 +440,9 @@ io.on('connection', async (socket) => {
           (chunk: string) => emitToChat('ai_stream_chunk', { messageId: msgId, chatId, chunk })
         );
       } catch (err) {
-        console.error('Debate turn error:', err);
-        fullContent = '（本轮 AI 发言失败，请稍后由群主重新尝试开始辩论或联系管理员。）';
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error('[debate] 辩手发言生成失败 turn=%d:', turn, errMsg);
+        fullContent = `（本轮 AI 发言失败：${errMsg.slice(0, 120)}）`;
         emitToChat('ai_stream_chunk', { messageId: msgId, chatId, chunk: fullContent });
       }
 
@@ -501,9 +528,9 @@ io.on('connection', async (socket) => {
         (chunk: string) => emitToChat('ai_stream_chunk', { messageId: msgId, chatId, chunk })
       );
     } catch (err) {
-      console.error('Debate judge error:', err);
-      fullContent =
-        '人家裁判麦断了啦！(╯°□°）╯ 算平局吧…\nVERDICT:tie';
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error('[debate] 裁判发言生成失败:', errMsg);
+      fullContent = `人家裁判麦断了啦！(╯°□°）╯（${errMsg.slice(0, 80)}）算平局吧…\nVERDICT:tie`;
       emitToChat('ai_stream_chunk', { messageId: msgId, chatId, chunk: fullContent });
     }
 
