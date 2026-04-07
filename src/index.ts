@@ -361,7 +361,11 @@ io.on('connection', async (socket) => {
   };
 
   const runDebateSequence = async (chatId: string) => {
-    const debateReplyGapMs = 30_000;
+    /** 免费模型易 429：默认 45s，可用 DEBATE_TURN_GAP_MS 覆盖（毫秒，≥5000） */
+    const debateReplyGapMs = Math.max(
+      5_000,
+      Number(process.env.DEBATE_TURN_GAP_MS) || 45_000
+    );
     for (let turn = 0; turn < DEBATE_TURN_SPECS.length; turn++) {
       if (turn > 0) {
         await new Promise((resolve) => setTimeout(resolve, debateReplyGapMs));
