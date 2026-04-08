@@ -20,9 +20,6 @@ export interface AIConfig {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
-  /** 仅用于 AI 辩论流式生成（OpenRouter，低优先级） */
-  openRouterApiKey?: string;
-  openRouterDebateModel?: string;
   /** 仅用于 AI 辩论流式生成（Google Gemini，高优先级） */
   geminiApiKey?: string;
   geminiDebateModel?: string;
@@ -1036,9 +1033,6 @@ ${closingInstruction}`;
     if (this.config.geminiApiKey) {
       return await this.streamGeminiDebate(systemContent, userContent, onChunk);
     }
-    if (this.config.openRouterApiKey) {
-      return await this.streamOpenRouterDebate(systemContent, userContent, onChunk);
-    }
     if (this.config.provider === 'deepseek' && this.config.apiKey) {
       return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
     }
@@ -1083,9 +1077,6 @@ ${transcript || '（无记录）'}`;
 
     if (this.config.geminiApiKey) {
       return await this.streamGeminiDebate(systemContent, userContent, onChunk);
-    }
-    if (this.config.openRouterApiKey) {
-      return await this.streamOpenRouterDebate(systemContent, userContent, onChunk);
     }
     if (this.config.provider === 'deepseek' && this.config.apiKey) {
       return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
@@ -1226,94 +1217,6 @@ ${transcript || '（无记录）'}`;
     });
   }
 
-  /**
-   * OpenRouter 免费模型易触发 429：对 429/503 做退避重试（尊重 Retry-After）。
-   * 环境变量：OPENROUTER_MAX_RETRIES（默认 8）、OPENROUTER_RETRY_BASE_MS（默认 4000）
-   */
-  private async streamOpenRouterDebate(
-    systemContent: string,
-    userContent: string,
-    onChunk: (chunk: string) => void
-  ): Promise<string> {
-    if (!this.config.openRouterApiKey) throw new Error('OpenRouter API key not configured');
-
-    const model =
-      this.config.openRouterDebateModel || 'meta-llama/llama-3.3-70b-instruct:free';
-
-    const payload = {
-      model,
-      messages: [
-        { role: 'system', content: systemContent },
-        { role: 'user', content: userContent }
-      ],
-      max_tokens: 2000,
-      temperature: 0.75,
-      top_p: 0.9,
-      stream: true as const
-    };
-
-    const headers = {
-      Authorization: `Bearer ${this.config.openRouterApiKey}`,
-      'Content-Type': 'application/json',
-      Referer: process.env.SERVER_URL || 'http://localhost:5000',
-      'X-Title': 'chat-app debate'
-    };
-
-    const maxAttempts = Math.min(
-      20,
-      Math.max(1, Number(process.env.OPENROUTER_MAX_RETRIES) || 8)
-    );
-    const baseDelayMs = Math.max(
-      1000,
-      Number(process.env.OPENROUTER_RETRY_BASE_MS) || 4000
-    );
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const response = await axios.post(
-        'https://openrouter.ai/api/v1/chat/completions',
-        payload,
-        {
-          responseType: 'stream',
-          validateStatus: () => true,
-          headers,
-          timeout: 120000
-        }
-      );
-
-      if (response.status === 200) {
-        return this.consumeOpenAICompatibleSseStream(response, onChunk);
-      }
-
-      const errBody = await this.readStreamToString(response.data as NodeJS.ReadableStream);
-
-      if (response.status === 429 || response.status === 503) {
-        let waitMs = Math.min(120_000, baseDelayMs * 2 ** (attempt - 1));
-        const ra = response.headers['retry-after'] ?? response.headers['Retry-After'];
-        if (ra != null) {
-          const sec = parseInt(String(ra), 10);
-          if (!Number.isNaN(sec) && sec > 0) {
-            waitMs = Math.max(waitMs, sec * 1000);
-          }
-        }
-        console.warn(
-          `[OpenRouter] HTTP ${response.status}，${waitMs}ms 后第 ${attempt}/${maxAttempts} 次重试`,
-          errBody.slice(0, 200)
-        );
-        if (attempt >= maxAttempts) {
-          throw new Error(
-            `OpenRouter 限流或服务繁忙(HTTP ${response.status})，已重试 ${maxAttempts} 次。可设置 DEBATE_TURN_GAP_MS 拉大辩手间隔，或换非 :free 模型。响应: ${errBody.slice(0, 400)}`
-          );
-        }
-        await new Promise((r) => setTimeout(r, waitMs));
-        continue;
-      }
-
-      throw new Error(`OpenRouter HTTP ${response.status}: ${errBody.slice(0, 600)}`);
-    }
-
-    throw new Error('OpenRouter: 重试耗尽');
-  }
-
   private async streamDeepSeekDebate(
     systemContent: string,
     userContent: string,
@@ -1347,7 +1250,7 @@ ${transcript || '（无记录）'}`;
     return this.consumeOpenAICompatibleSseStream(response, onChunk);
   }
 
-  /** DeepSeek / OpenRouter 等均使用 OpenAI 兼容的 SSE 流格式 */
+  /** DeepSeek 使用 OpenAI 兼容的 SSE 流格式 */
   private consumeOpenAICompatibleSseStream(
     response: { data: NodeJS.ReadableStream },
     onChunk: (chunk: string) => void

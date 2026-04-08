@@ -45,10 +45,6 @@ if (!DEEPSEEK_API_KEY) {
 } else {
   console.log('🔑 DeepSeek API key loaded');
 }
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-if (OPENROUTER_API_KEY) {
-  console.log('🔑 OpenRouter API key loaded (AI 辩论 fallback)');
-}
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (GEMINI_API_KEY) {
   console.log('🔑 Gemini API key loaded (AI 辩论)');
@@ -57,9 +53,6 @@ const aiService = new AIService({
   provider: 'deepseek',
   model: 'deepseek-chat',
   apiKey: DEEPSEEK_API_KEY,
-  openRouterApiKey: OPENROUTER_API_KEY,
-  openRouterDebateModel:
-    process.env.OPENROUTER_DEBATE_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
   geminiApiKey: GEMINI_API_KEY,
   geminiDebateModel: process.env.GEMINI_DEBATE_MODEL || 'gemini-3.1-flash-lite-preview'
 }, dbStorage);
