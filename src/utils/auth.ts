@@ -38,8 +38,8 @@ export const verifyToken = (token: string): any => {
 export const createSafeUser = (
   user: User,
   publicBase?: string
-): Omit<User, 'passwordHash'> => {
-  const { passwordHash, ...safeUser } = user;
+): Omit<User, 'passwordHash' | 'fcmTokens'> => {
+  const { passwordHash, fcmTokens: _fcm, ...safeUser } = user;
   if (!publicBase) return safeUser;
   return {
     ...safeUser,

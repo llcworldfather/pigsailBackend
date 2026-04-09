@@ -8,6 +8,8 @@ export interface User {
   lastSeen: Date;
   joinedAt: Date;
   passwordHash: string;
+  /** Server-only: Web FCM registration tokens; never expose to API clients */
+  fcmTokens?: string[];
 }
 
 /** 辩论消息元数据（AI 辩手发言） */

@@ -1,10 +1,14 @@
-import { db, Timestamp } from '../utils/firebase';
+import { db, Timestamp, FieldValue } from '../utils/firebase';
 import { User } from '../types';
 import { DocumentData } from 'firebase-admin/firestore';
 
 const USERS = 'users';
 
 function docToUser(id: string, data: DocumentData): User {
+  const rawTokens = data.fcmTokens;
+  const fcmTokens = Array.isArray(rawTokens)
+    ? rawTokens.filter((t: unknown): t is string => typeof t === 'string' && t.length > 0)
+    : undefined;
   return {
     id,
     username: data.username,
@@ -14,7 +18,8 @@ function docToUser(id: string, data: DocumentData): User {
     avatar: data.avatar || undefined,
     status: data.status || 'offline',
     joinedAt: data.joinedAt?.toDate() || new Date(),
-    lastSeen: data.lastSeen?.toDate() || new Date()
+    lastSeen: data.lastSeen?.toDate() || new Date(),
+    ...(fcmTokens?.length ? { fcmTokens } : {})
   };
 }
 
@@ -143,6 +148,34 @@ export class UserDAO {
       return await this.findById(id);
     } catch {
       return null;
+    }
+  }
+
+  static async addFcmToken(userId: string, token: string): Promise<boolean> {
+    const t = token.trim();
+    if (!t || t.length < 20) return false;
+    try {
+      await db.collection(USERS).doc(userId).update({
+        fcmTokens: FieldValue.arrayUnion(t),
+        updatedAt: Timestamp.now()
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  static async removeFcmToken(userId: string, token: string): Promise<boolean> {
+    const t = token.trim();
+    if (!t) return false;
+    try {
+      await db.collection(USERS).doc(userId).update({
+        fcmTokens: FieldValue.arrayRemove(t),
+        updatedAt: Timestamp.now()
+      });
+      return true;
+    } catch {
+      return false;
     }
   }
 

@@ -30,6 +30,54 @@ const authenticateToken = (req: express.Request, res: express.Response, next: ex
   }
 };
 
+router.post('/me/fcm-token', authenticateToken, async (req, res) => {
+  try {
+    const userId = (req as express.Request & { user: { id: string } }).user.id;
+    const { token } = req.body as { token?: string };
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'token is required'
+      } as ApiResponse);
+    }
+    const ok = await dbStorage.addFcmToken(userId, token);
+    if (!ok) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to save FCM token'
+      } as ApiResponse);
+    }
+    res.json({ success: true } as ApiResponse);
+  } catch (error) {
+    console.error('Register FCM token error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    } as ApiResponse);
+  }
+});
+
+router.delete('/me/fcm-token', authenticateToken, async (req, res) => {
+  try {
+    const userId = (req as express.Request & { user: { id: string } }).user.id;
+    const { token } = req.body as { token?: string };
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'token is required'
+      } as ApiResponse);
+    }
+    await dbStorage.removeFcmToken(userId, token);
+    res.json({ success: true } as ApiResponse);
+  } catch (error) {
+    console.error('Remove FCM token error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    } as ApiResponse);
+  }
+});
+
 // Get all users
 router.get('/', authenticateToken, async (req, res) => {
   try {

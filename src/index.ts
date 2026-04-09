@@ -29,6 +29,7 @@ import {
   DebateState,
   DEBATE_TURN_SPECS
 } from './types';
+import { sendOfflineNewMessagePush } from './services/fcm-push';
 
 // Import routes
 import authRoutes from './routes/auth';
@@ -1633,6 +1634,51 @@ io.on('connection', async (socket) => {
           participantSocket.emit('new_message', message);
         }
       });
+
+      const bodyPreview =
+        message.type === 'image'
+          ? '[图片]'
+          : message.type === 'file'
+            ? '[文件]'
+            : (message.content || '').slice(0, 120);
+      const pushTitle =
+        chat.type === 'group'
+          ? `${user.displayName || user.username} · ${chat.name || '群聊'}`
+          : `${user.displayName || user.username}`;
+
+      const offlineRecipientIds = chat.participants.filter(
+        (pid) => pid !== message.senderId && !getParticipantSocket(pid)
+      );
+      if (offlineRecipientIds.length > 0) {
+        const offlineUsers = await Promise.all(
+          offlineRecipientIds.map((id) => dbStorage.getUserById(id))
+        );
+        for (const recipient of offlineUsers) {
+          const tokens = recipient?.fcmTokens?.filter(Boolean) ?? [];
+          if (!recipient) continue;
+          if (tokens.length === 0) {
+            console.log(
+              `[FCM] skip user=${recipient.id} (${recipient.username}): no fcmTokens in Firestore — recipient must open the app, allow notifications, and register token (sidebar bell / login).`
+            );
+            continue;
+          }
+          void sendOfflineNewMessagePush({
+            recipientUserId: recipient.id,
+            tokens,
+            title: pushTitle,
+            body: bodyPreview || '新消息',
+            data: {
+              chatId: message.chatId,
+              messageId: message.id,
+              senderId: message.senderId,
+              type: message.type || 'text',
+              // Web SW 回退：部分环境下仅 data 会进入 onBackgroundMessage，须带可展示文案
+              title: pushTitle,
+              body: bodyPreview || '新消息'
+            }
+          }).catch((err) => console.error('FCM offline push failed:', err));
+        }
+      }
 
       // Mention notifications: @displayName / @username in group chat
       if (chat.type === 'group') {

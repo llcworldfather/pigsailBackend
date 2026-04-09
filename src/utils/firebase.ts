@@ -70,8 +70,13 @@ const serviceAccount = loadServiceAccount();
 const storageBucket = process.env.FIREBASE_STORAGE_BUCKET?.trim();
 
 if (!admin.apps.length) {
+  const projectId =
+    process.env.GOOGLE_CLOUD_PROJECT?.trim() ||
+    process.env.GCLOUD_PROJECT?.trim() ||
+    (serviceAccount as { project_id?: string }).project_id;
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
+    ...(projectId ? { projectId } : {}),
     ...(storageBucket ? { storageBucket } : {})
   });
 }

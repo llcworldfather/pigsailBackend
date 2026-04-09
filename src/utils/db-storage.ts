@@ -39,6 +39,14 @@ class DatabaseStorage {
     await UserDAO.updateLastSeen(id);
   }
 
+  async addFcmToken(userId: string, token: string): Promise<boolean> {
+    return UserDAO.addFcmToken(userId, token);
+  }
+
+  async removeFcmToken(userId: string, token: string): Promise<boolean> {
+    return UserDAO.removeFcmToken(userId, token);
+  }
+
   async updateUser(id: string, updates: {
     displayName?: string;
     avatar?: string;
