@@ -1031,7 +1031,16 @@ ${closingInstruction}`;
     const userContent = '请严格按创建者人设输出你的本轮发言正文。';
 
     if (this.config.geminiApiKey) {
-      return await this.streamGeminiDebate(systemContent, userContent, onChunk);
+      try {
+        return await this.streamGeminiDebate(systemContent, userContent, onChunk);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn('[debate] Gemini 失败，降级 DeepSeek:', msg.slice(0, 220));
+        if (this.config.provider === 'deepseek' && this.config.apiKey) {
+          return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
+        }
+        throw err;
+      }
     }
     if (this.config.provider === 'deepseek' && this.config.apiKey) {
       return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
@@ -1078,7 +1087,16 @@ VERDICT:tie`;
 ${transcript || '（无记录）'}`;
 
     if (this.config.geminiApiKey) {
-      return await this.streamGeminiDebate(systemContent, userContent, onChunk);
+      try {
+        return await this.streamGeminiDebate(systemContent, userContent, onChunk);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn('[debate] 裁判 Gemini 失败，降级 DeepSeek:', msg.slice(0, 220));
+        if (this.config.provider === 'deepseek' && this.config.apiKey) {
+          return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
+        }
+        throw err;
+      }
     }
     if (this.config.provider === 'deepseek' && this.config.apiKey) {
       return await this.streamDeepSeekDebate(systemContent, userContent, onChunk);
